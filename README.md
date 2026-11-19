@@ -16,7 +16,7 @@ Linux, Python 3.11 or newer:
 ```bash
 python -m venv .venv
 . .venv/bin/activate
-python -m pip install -e '.[dev]'
+python -m pip install -e '.[dev]' ó python -m pip install --only-binary=:all: -e '.[dev]'
 mastercap --version
 python -m pytest
 ```
