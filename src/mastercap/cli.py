@@ -83,7 +83,7 @@ def parser():
             command.add_argument("--distribution", choices=("random", "regular"), default="random")
             command.add_argument("--seed", type=int, help="Nonnegative seed; recorded random seed when omitted")
             command.add_argument("--max-iterations", type=int, default=1000, help="Maximum repair iterations (provisional: 1000)")
-            command.add_argument("--time-limit", type=finite_positive, default=300.0, help="Cooperative search/inventory time budget in seconds (provisional: 300)")
+            command.add_argument("--time-limit", type=finite_positive, default=300.0, help="Cooperative repair-search budget in seconds, shared with fallback; excludes input, analysis, inventory and initialization (default: 300)")
             command.add_argument("--overlap-margin", type=finite_nonnegative, default=0.0, help="Required positive vdW overlap beyond this margin in A")
             command.add_argument("--profile-tolerance", type=finite_nonnegative, help="Maximum normalized integrated error for EACH element; no calibrated default")
             command.add_argument("--composition-tolerance", type=finite_nonnegative, help="Relative count tolerance per element, with one-atom rounding allowance; no calibrated default")
@@ -140,7 +140,7 @@ def diagnostic(args, report, protected):
     LOG.error("No new PDB written. Diagnostic: %s", path)
 
 
-def generate_command(args, analysis, source, acquisition, started, names):
+def generate_command(args, analysis, source, acquisition, started, names, preparation_timings=None):
     if args.seed is None:
         args.seed = secrets.randbits(63)
     if args.seed < 0 or args.max_iterations < 0:
@@ -149,39 +149,62 @@ def generate_command(args, analysis, source, acquisition, started, names):
     edges, profiles = target_profiles(analysis, args.inner_radius, args.outer_radius)
     center = analysis.center if args.center == "reference" else np.zeros(3)
     report = base_report(args, started)
+    timings = dict(preparation_timings or {})
+    timings.update({"inventory": 0.0, "initialization": 0.0, "search": 0.0, "export_validation": 0.0})
+    report["timings_seconds"] = timings
     report.update({"analysis_options": analysis_options(args), "analysis": analysis.summary(),
                    "acquisition": acquisition, "target": {"center": center.tolist(), "edges": edges.tolist(),
                    "profiles": {e: p.tolist() for e, p in profiles.items()}},
                    "calibration": "pending_1cwp", "pdb_convention": "TER segments; serials and chains may repeat"})
     LOG.info("Selected reference: %d atoms; target radii %.3f..%.3f A; seed %d", len(analysis.structure.atoms), edges[0], edges[-1], args.seed)
+    export_started = None
     try:
-        inventory, trace = select_inventory(analysis, edges, profiles, rng, min(15.0, args.time_limit))
+        inventory_started = time.monotonic()
+        try:
+            inventory, trace = select_inventory(analysis, edges, profiles, rng, time_limit=15.0)
+        finally:
+            timings["inventory"] = time.monotonic()-inventory_started
         report["residue_inventory"] = trace
         def progress(iteration, geometry, metrics):
             LOG.info("Iteration %d: components=%d distance violations=%d radial violations=%d profile error=%.4f", iteration,
                      geometry["global_components"], geometry["distance_violations"], geometry["outside_radial_bounds"], metrics["total_profile_error"])
         mode = args.mode
+        def attempt(search_mode):
+            attempt_started = time.monotonic()
+            try:
+                result, details = search(inventory.copy(), analysis, edges, profiles, center, rng,
+                                         mode=search_mode, distribution=args.distribution,
+                                         max_iterations=args.max_iterations,
+                                         time_limit=args.time_limit-timings["search"],
+                                         margin=args.overlap_margin, profile_tolerance=args.profile_tolerance,
+                                         composition_tolerance=args.composition_tolerance, progress=progress)
+            except MastercapError:
+                # Search raises only for invalid settings/templates during prep.
+                timings["initialization"] += time.monotonic()-attempt_started
+                raise
+            timings["initialization"] += details["preparation_seconds"]
+            timings["search"] += details["elapsed_seconds"]
+            return result, details
+
         try:
-            particle, search_report = search(inventory.copy(), analysis, edges, profiles, center, rng,
-                                             mode, args.distribution, args.max_iterations, args.time_limit,
-                                             args.overlap_margin, args.profile_tolerance, args.composition_tolerance,
-                                             started, progress)
+            particle, search_report = attempt(mode)
         except MastercapError as exc:
             if not args.allow_independent_fallback or mode != "residue":
                 raise
             particle, search_report = None, {"error": str(exc)}
-        if particle is None and args.allow_independent_fallback and mode == "residue" and time.monotonic()-started < args.time_limit:
+        if particle is None and args.allow_independent_fallback and mode == "residue" and timings["search"] < args.time_limit:
             report["rigid_search"] = search_report
             mode = "independent"
             LOG.warning("Explicitly authorized fallback to independent mode")
-            particle, search_report = search(inventory.copy(), analysis, edges, profiles, center, rng,
-                                             mode, args.distribution, args.max_iterations, args.time_limit,
-                                             args.overlap_margin, args.profile_tolerance, args.composition_tolerance,
-                                             started, progress)
+            particle, search_report = attempt(mode)
         report["effective_mode"] = mode
         report["search"] = search_report
+        timings["preparation"] = time.monotonic()-started-timings["search"]
+        LOG.info("Preparation %.3f s; repair search %.3f s / %.3f s; termination=%s",
+                 timings["preparation"], timings["search"], args.time_limit, search_report.get("termination", "preparation_error"))
         if particle is None:
-            raise MastercapError("Search budget exhausted without a candidate satisfying every mandatory constraint")
+            raise MastercapError(f"Search ended ({search_report.get('termination', 'preparation_error')}) without a candidate satisfying every mandatory constraint")
+        export_started = time.monotonic()
         text, mapping = pdb_text(particle)
         with tempfile.TemporaryDirectory(prefix="mastercap-validate-") as directory:
             temporary = Path(directory)/"particle.pdb"
@@ -215,11 +238,16 @@ def generate_command(args, analysis, source, acquisition, started, names):
                        "peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024})
         files = {names["pdb"]: text}
         extra_profiles(files, names, edges, analysis.original, profiles, metrics["generated_profiles"])
+        timings["export_validation"] = time.monotonic()-export_started
+        report["elapsed_seconds"] = time.monotonic()-started
         files[names["json"]] = encode_json(report)
         publish(files, args.overwrite, [source])
         LOG.info("%s: %s (%d atoms)", status, names["pdb"], len(particle.atoms))
         return 0 if status == "valid" else 2
     except (MastercapError, KeyboardInterrupt) as exc:
+        if export_started is not None:
+            timings["export_validation"] = time.monotonic()-export_started
+        timings.setdefault("preparation", time.monotonic()-started-timings["search"])
         report.update({"status": "failed", "error": str(exc) or "Interrupted by user",
                        "elapsed_seconds": time.monotonic()-started})
         diagnostic(args, report, [source])
@@ -274,6 +302,7 @@ def run(args):
             diagnostic(args, report, [args.input] if args.input else [])
             return 1
         raise
+    preparation_timings = {"reference": time.monotonic()-started}
     names = artifacts(args.output_prefix, args.csv, args.plot, args.command == "generate")
     protected = [source]
     if args.command == "validate":
@@ -282,7 +311,9 @@ def run(args):
     if args.command == "validate":
         return validate_command(args, source, started, names)
     try:
+        analysis_started = time.monotonic()
         analysis = analyze(read_pdb(source, args.model), **analysis_options(args))
+        preparation_timings["analysis"] = time.monotonic()-analysis_started
     except (MastercapError, OSError, EOFError) as exc:
         if args.command == "generate":
             report = base_report(args, started)
@@ -293,7 +324,7 @@ def run(args):
     for warning in analysis.warnings:
         LOG.warning(warning)
     if args.command == "generate":
-        return generate_command(args, analysis, source, acquisition, started, names)
+        return generate_command(args, analysis, source, acquisition, started, names, preparation_timings)
     report = base_report(args, started)
     report.update({"status": "analyzed", "analysis_options": analysis_options(args),
                    "analysis": analysis.summary(), "acquisition": acquisition})

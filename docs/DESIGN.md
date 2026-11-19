@@ -21,8 +21,23 @@ errors. No missing chemistry is reconstructed.
 The initial search samples residue centers, rotates templates, and repairs
 geometry with bounded moves. Independent updates deform residues; rigid updates
 project onto rotations and translations. cKDTree and sparse graphs avoid an
-unconditional N×N distance matrix. Component bridges are proposals, never evidence
-of actual connectivity. Actual rounded coordinates determine acceptance.
+unconditional N×N distance matrix. Per-inventory metadata caches element codes,
+vdW radii, residue groups, element indices and pair limits. Each repair iteration
+builds local geometry once on rounded coordinates and reuses it for both checks
+and repair proposals. Final PDB reread validation independently rebuilds checks.
+
+Contacts use atom boundaries rather than arbitrary component representatives.
+Batched local queries retain the nearest compatible contact per component pair;
+components without outgoing proposals use external queries partitioned by element
+compatibility. Kruskal selection reduces proposals to a sparse spanning forest.
+This forest can remain disconnected; it is a repair proposal, never evidence of
+actual connectivity. No component-ID chain is inserted. Internal residue repair
+uses the same compatibility rules. Rounded coordinates determine acceptance.
+
+Preparation and repair clocks are separate. Initialization and inventory do not
+consume the cooperative repair budget; explicit fallback shares only remaining
+repair time. Reports distinguish time and iteration exhaustion and record phase
+timings. See README for report field semantics.
 
 Schema-v1 generation JSON includes analysis settings, reference hash, profiles,
 target geometry, effective mode, inventory, atom mapping, transforms, checks,

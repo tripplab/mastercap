@@ -1,17 +1,15 @@
 """Bounded geometric search. Failure to converge is not proof of infeasibility."""
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import replace
 import time
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
-from scipy.sparse import coo_matrix
-from scipy.sparse.csgraph import minimum_spanning_tree
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 
 from .model import Structure, MastercapError
 from .analysis import shell_volumes
-from .constraints import local_geometry, validate_geometry, profile_metrics, acceptance
+from .constraints import GeometryMetadata, local_geometry, validate_geometry, profile_metrics, acceptance
 
 
 def residue_groups(structure):
@@ -83,8 +81,8 @@ def sample_radii(profile, edges, n, rng):
     return (edges[bins]**3 + rng.random(n) * (edges[bins+1]**3-edges[bins]**3))**(1/3)
 
 
-def initialize(structure, analysis, edges, profiles, center, rng, mode, distribution):
-    groups = residue_groups(structure)
+def initialize(structure, analysis, edges, profiles, center, rng, mode, distribution, *, groups=None):
+    groups = residue_groups(structure) if groups is None else groups
     n = len(groups)
     if distribution == "regular":
         k = np.arange(n)
@@ -114,36 +112,89 @@ def initialize(structure, analysis, edges, profiles, center, rng, mode, distribu
     return trace
 
 
-def connect_edges(xyz, labels):
-    """Sparse nearby-component bridges; spanning forest, not a claim of connectivity."""
-    if len(np.unique(labels)) <= 1:
+def connect_edges(xyz, labels, *, metadata=None, atom_indices=None, margin=0.0):
+    """A sparse forest of nearby, compatible component-boundary contacts.
+
+    Start with batched local queries. Components without a compatible outgoing
+    proposal use an external-component query, not arbitrary representatives.
+    The forest is a repair proposal, never evidence of actual connectivity.
+    """
+    _, labels = np.unique(labels, return_inverse=True)
+    count = int(labels.max())+1 if len(labels) else 0
+    if count <= 1:
         return np.empty((0, 2), dtype=int)
-    # Bounded nearest-neighbor graph. Increase k only when no cross-component
-    # edges are found; large separated components use representative bridges.
-    n = len(xyz)
-    k = min(16, n)
-    _, neighbors = cKDTree(xyz).query(xyz, k=k)
-    neighbors = np.asarray(neighbors).reshape(n, k)
-    src = np.repeat(np.arange(n), k)
-    dst = neighbors.ravel()
-    keep = labels[src] != labels[dst]
-    pairs = np.column_stack([src[keep], dst[keep]])
-    # Include a representative spanning tree to connect separated clusters even
-    # when each cluster has more than k internal neighbors.
-    _, representatives = np.unique(labels, return_index=True)
-    reps = xyz[representatives]
-    kr = min(8, len(reps))
-    _, nearest = cKDTree(reps).query(reps, k=kr)
-    nearest = np.asarray(nearest).reshape(len(reps), kr)
-    a = np.repeat(np.arange(len(reps)), kr)
-    b = nearest.ravel()
-    distance = np.linalg.norm(reps[a]-reps[b], axis=1)
-    graph = coo_matrix((np.maximum(distance, 1e-12), (a, b)), shape=(len(reps), len(reps))).tocsr()
-    mst = minimum_spanning_tree(graph + graph.T).tocoo()
-    bridges = np.column_stack([representatives[mst.row], representatives[mst.col]])
-    # At least a chain of representatives also bridges disjoint kNN subgraphs.
-    chain = np.column_stack([representatives[:-1], representatives[1:]])
-    return np.unique(np.sort(np.vstack([pairs, bridges, chain]), axis=1), axis=0)
+    if metadata is None:
+        radii, codes, matrix = np.zeros(len(xyz)), None, None
+    else:
+        indices = np.arange(len(xyz)) if atom_indices is None else atom_indices
+        radii, codes, matrix = metadata.radii[indices], metadata.codes[indices], metadata.lower_matrix
+    has_contact = np.zeros(count, dtype=bool)
+    contacts = {}
+
+    def consider(src, dst):
+        keep = labels[src] != labels[dst]
+        src, dst = src[keep], dst[keep]
+        if matrix is not None:
+            compatible = matrix[codes[src], codes[dst]] < radii[src]+radii[dst]-margin-0.003
+            src, dst = src[compatible], dst[compatible]
+        if not len(src):
+            return
+        gaps = np.maximum(0.0, np.linalg.norm(xyz[src]-xyz[dst], axis=1)-radii[src]-radii[dst]+margin)
+        component, other = labels[src], labels[dst]
+        has_contact[component] = has_contact[other] = True
+        keys = np.minimum(component, other)*count+np.maximum(component, other)
+        lo, hi = np.minimum(src, dst), np.maximum(src, dst)
+        # Keep the best atom contact per component pair, so local alternatives
+        # remain available to the spanning forest (without millions of forces).
+        order = np.lexsort((hi, lo, gaps, keys))
+        first = np.r_[True, np.diff(keys[order]) != 0]
+        take = order[first]
+        for index in take:
+            item = (float(gaps[index]), int(lo[index]), int(hi[index]))
+            key = int(keys[index])
+            if key not in contacts or item < contacts[key]:
+                contacts[key] = item
+
+    tree = cKDTree(xyz)
+    k = min(16, len(xyz))
+    # Bound neighbor working memory independently of particle size.
+    for start in range(0, len(xyz), 4096):
+        source = np.arange(start, min(start+4096, len(xyz)))
+        nearest = tree.query(xyz[source], k=k)[1].reshape(len(source), k)
+        consider(np.repeat(source, k), nearest.ravel())
+    for component in np.flatnonzero(~has_contact):
+        if has_contact[component]:
+            continue
+        sources = np.flatnonzero(labels == component)
+        outside = labels != component
+        partitions = [sources] if codes is None else [sources[codes[sources] == c] for c in np.unique(codes[sources])]
+        for part in partitions:
+            allowed = outside.copy()
+            if matrix is not None:
+                allowed &= matrix[codes[part[0]], codes] < radii[part[0]]+radii-margin-0.003
+            targets = np.flatnonzero(allowed)
+            if not len(targets):
+                continue
+            nearest = cKDTree(xyz[targets]).query(xyz[part], k=1)[1]
+            consider(part, targets[nearest])
+
+    if not contacts:
+        return np.empty((0, 2), dtype=int)
+    parent = np.arange(count)
+
+    def root(component):
+        while parent[component] != component:
+            parent[component] = parent[parent[component]]
+            component = parent[component]
+        return component
+
+    forest = []
+    for _, a, b in sorted(contacts.values()):
+        ra, rb = root(labels[a]), root(labels[b])
+        if ra != rb:
+            parent[ra] = rb
+            forest.append((a, b))
+    return np.asarray(forest, dtype=int).reshape(-1, 2)
 
 
 def pair_forces(force, xyz, pairs, desired, strength=0.5):
@@ -177,14 +228,13 @@ def update_positions(structure, force, groups, mode):
         structure.xyz[group] = (original-center) @ rotation + target_center
 
 
-def characteristic_forces(force, structure, analysis):
+def characteristic_forces(force, structure, analysis, metadata):
     """Weak nearest-neighbor statistical target, subordinate to feasibility."""
-    elements = structure.elements
     for (a, b), lower in analysis.limits.items():
         summary = analysis.neighbor_samples["-".join((a, b))]["percentiles"]
         if "50" not in summary:
             continue
-        ai, bi = np.flatnonzero(elements == a), np.flatnonzero(elements == b)
+        ai, bi = metadata.element_indices[a], metadata.element_indices[b]
         if not len(ai) or not len(bi) or (a == b and len(ai) < 2):
             continue
         if a == b:
@@ -198,30 +248,36 @@ def characteristic_forces(force, structure, analysis):
 
 def search(structure, analysis, edges, profiles, center, rng, mode="independent",
            distribution="random", max_iterations=1000, time_limit=300.0, margin=0.0,
-           profile_tolerance=None, composition_tolerance=None, started=None, progress=None):
-    started = time.monotonic() if started is None else started
+           profile_tolerance=None, composition_tolerance=None, progress=None):
+    preparation_started = time.monotonic()
     if max_iterations < 0 or time_limit <= 0 or margin < 0:
         raise MastercapError("Iterations and overlap margin must be nonnegative; time limit positive")
-    groups = residue_groups(structure)
-    rotations = initialize(structure, analysis, edges, profiles, center, rng, mode, distribution)
+    metadata = GeometryMetadata.build(structure, analysis.limits)
+    groups = list(metadata.groups.values())
+    rotations = initialize(structure, analysis, edges, profiles, center, rng, mode, distribution, groups=groups)
     if mode == "residue":
-        check = local_geometry(structure, analysis.limits, margin, mode)
+        check = local_geometry(structure, analysis.limits, margin, mode, metadata=metadata)
         if check["disconnected_residues"]:
             raise MastercapError("A required rigid residue template is internally disconnected")
-    elements = structure.elements
     quantiles = {}
     for e, profile in profiles.items():
-        indices = np.flatnonzero(elements == e)
+        indices = metadata.element_indices[e]
         # Fixed order statistics avoid introducing fresh noise each iteration.
         quantiles[e] = np.sort(sample_radii(profile, edges, len(indices), rng))
     best, best_key = None, (float("inf"), float("inf"))
     last_report = None
+    preparation_seconds = time.monotonic()-preparation_started
+    # The repair budget starts only after inventory-dependent initialization.
+    started = time.monotonic()
+    termination = "iteration_limit"
     for iteration in range(max_iterations+1):
         # All feasibility decisions use the same precision as exported PDB.
-        candidate = structure.copy()
-        candidate.xyz = np.round(candidate.xyz, 3)
-        geometry = validate_geometry(candidate, center, edges, analysis.limits, margin, mode)
-        metrics = profile_metrics(candidate, center, edges, profiles, analysis.original)
+        candidate = Structure(structure.atoms, np.round(structure.xyz, 3),
+                              structure.warnings, structure.provenance)
+        local = local_geometry(candidate, analysis.limits, margin, mode, metadata=metadata)
+        geometry = validate_geometry(candidate, center, edges, analysis.limits, margin, mode,
+                                     local=local, metadata=metadata)
+        metrics = profile_metrics(candidate, center, edges, profiles, analysis.original, metadata=metadata)
         status = acceptance(geometry, metrics, profile_tolerance, composition_tolerance)
         last_report = {"geometry": geometry, "metrics": metrics, "status": status,
                        "iterations": iteration, "elapsed_seconds": time.monotonic()-started}
@@ -230,36 +286,36 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             if key < best_key:
                 best, best_key = (candidate, last_report.copy()), key
             if status == "valid" or status == "uncalibrated":
+                termination = "constraints_satisfied"
                 break
         if progress and iteration % 25 == 0:
             progress(iteration, geometry, metrics)
-        if iteration == max_iterations or time.monotonic()-started >= time_limit:
+        if time.monotonic()-started >= time_limit:
+            termination = "time_limit"
             break
-        local = local_geometry(structure, analysis.limits, margin, mode)
+        if iteration == max_iterations:
+            termination = "iteration_limit"
+            break
         force = np.zeros_like(structure.xyz)
         repair = local["distances"] < local["lower"]+0.003
         if mode == "residue":
-            residues = structure.residues
+            residues = metadata.residues
             repair &= residues[local["pairs"][:, 0]] != residues[local["pairs"][:, 1]]
         pairs = local["pairs"][repair]
         lower = local["lower"][repair]
         # Safety spacing protects against 0.001 A PDB rounding.
         pair_forces(force, structure.xyz, pairs, lower+0.003, strength=0.6)
         # Internal graphs are repaired separately from the global graph.
-        for group in groups:
-            labels = local["internal_labels"][group]
-            if len(np.unique(labels)) > 1:
-                bridges = group[connect_edges(structure.xyz[group], labels)]
-                cap = structure.radii[bridges].sum(axis=1)-margin-0.003
-                if np.any(cap <= 0):
-                    raise MastercapError("Overlap margin makes a required residue connection impossible")
-                pair_forces(force, structure.xyz, bridges, cap, strength=0.3)
+        for residue in local["disconnected_residues"]:
+            group = metadata.groups[residue]
+            bridges = group[connect_edges(candidate.xyz[group], local["internal_labels"][group],
+                                         metadata=metadata, atom_indices=group, margin=margin)]
+            cap = metadata.radii[bridges].sum(axis=1)-margin-0.003
+            pair_forces(force, structure.xyz, bridges, cap, strength=0.3)
         if local["components"] > 1:
-            bridges = connect_edges(structure.xyz, local["labels"])
-            cap = structure.radii[bridges].sum(axis=1)-margin-0.003
-            lower = np.array([analysis.limits[tuple(sorted((elements[a], elements[b])))] for a, b in bridges])
-            allowed = lower < cap
-            pair_forces(force, structure.xyz, bridges[allowed], cap[allowed], strength=0.15)
+            bridges = connect_edges(candidate.xyz, local["labels"], metadata=metadata, margin=margin)
+            cap = metadata.radii[bridges].sum(axis=1)-margin-0.003
+            pair_forces(force, structure.xyz, bridges, cap, strength=0.15)
         offset = structure.xyz-center
         radial = np.linalg.norm(offset, axis=1)
         direction = offset/np.maximum(radial, 1e-12)[:, None]
@@ -267,21 +323,26 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         clipped = np.clip(radial, edges[0]+0.002, edges[-1]-0.002)
         force += (clipped-radial)[:, None]*direction*0.8
         # Soft radial transport; rank by current radius for each element.
-        for e, target_radial in quantiles.items():
-            indices = np.flatnonzero(elements == e)
-            order = indices[np.argsort(radial[indices], kind="stable")]
-            if geometry["mandatory_pass"]:
+        if geometry["mandatory_pass"]:
+            for e, target_radial in quantiles.items():
+                indices = metadata.element_indices[e]
+                order = indices[np.argsort(radial[indices], kind="stable")]
                 force[order] += 0.015*(target_radial-radial[order])[:, None]*direction[order]
         force += (center-structure.xyz.mean(axis=0))*0.1
         if geometry["mandatory_pass"]:
-            characteristic_forces(force, structure, analysis)
+            characteristic_forces(force, structure, analysis, metadata)
         update_positions(structure, force, groups, mode)
+        del local, force
     if best is not None:
         output, report = best
+        report["candidate_iteration"] = report["iterations"]
     else:
         output, report = None, last_report
     report["elapsed_seconds"] = time.monotonic()-started
-    report["termination"] = "feasible_candidate" if output is not None else "search_budget_exhausted"
+    report["preparation_seconds"] = preparation_seconds
+    report["iterations"] = iteration
+    report["termination"] = termination
+    report["candidate_available"] = output is not None
     report["initial_transforms"] = rotations
     return output, report
 

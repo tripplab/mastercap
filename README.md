@@ -113,8 +113,14 @@ enlarged, and use integer optimization for element/variant count errors.
 volume-weighted radial positions. `regular` uses Fibonacci directions and radial
 layers. Repair may move these positions; a perfect final lattice is not promised.
 
-The repair search uses spatial neighbors, repulsion, component bridges, radial
-transport, and center correction. Rigid updates use Kabsch projection. Mandatory
+The repair search uses spatial neighbors, repulsion, component contacts, radial
+transport, and center correction. Contacts are selected at nearby component
+boundaries, filtered for minimum-distance/overlap compatibility, and reduced to
+a sparse minimum spanning forest of the proposals. Dense components without a
+local outgoing proposal use external-component queries. There are no contacts
+added solely by component-ID order. The same compatibility filter applies inside
+residues. The contact forest proposes moves; it is not proof of connectivity.
+Rigid updates use Kabsch projection. Mandatory
 repairs precede soft profile improvement. The search is heuristic, not a physical
 simulation, and does not guarantee convergence or final angular isotropy.
 
@@ -138,12 +144,32 @@ radius sums. Fallbacks are reported. Incompatible pairs cannot provide connectio
 Rigid internal distances are preserved even below inferred limits, with
 exceptions reported. Required internally disconnected rigid templates cause
 failure. `--allow-independent-fallback` explicitly authorizes a retry with
-independent atoms and the remaining time budget.
+independent atoms and the remaining repair-search time budget.
 
-`--max-iterations` and `--time-limit` bound search effort. The time budget is
-cooperative: an individual spatial query or optimizer call may finish after the
-deadline. v1 does not resume interrupted runs. Search failure is not proof of
-mathematical infeasibility.
+`--max-iterations` bounds repair steps per attempt. `--time-limit` (default 300 s)
+is a **repair-search** budget: download, parsing, analysis, inventory selection,
+and initialization are excluded. Inventory optimization has a separate 15-second
+solver limit. Rigid and explicitly authorized independent fallback attempts share
+the repair budget; a fallback does not receive a fresh full budget. The limit is
+cooperative: an individual spatial query may finish after the deadline.
+
+Reports contain `timings_seconds` for reference acquisition, analysis (including
+parsing), inventory, initialization, preparation overall, repair search, and
+export/validation. Preparation is an aggregate, not an additional phase to sum
+with its subphases. `search.elapsed_seconds` measures only the reported attempt's
+repair search; `search.preparation_seconds` measures its initialization/metadata
+setup. `timings_seconds.search` includes both attempts when fallback occurs.
+`search.termination` is `time_limit`, `iteration_limit`, or `constraints_satisfied`.
+`iterations` counts completed repair updates; `candidate_iteration` identifies
+the selected feasible candidate, which can precede termination. Search may end
+at a limit while still returning a previously feasible approximate candidate.
+v1 does not resume interrupted runs. Search failure is not proof of mathematical
+infeasibility.
+
+Static element/radius/residue metadata is cached per inventory. Each search
+iteration computes one neighbor/overlap graph on PDB-rounded coordinates and
+reuses it for checking and proposing repairs. Final export still independently
+rereads the written PDB and rebuilds its geometry checks.
 
 ## Acceptance and reports
 
@@ -213,3 +239,12 @@ Before a full-capsid release we still need the expanded 1CWP file, calibration o
 smoothing/tolerances, complete-capsid timing and memory measurements, convergence
 assessment, and an installed VMD for compatibility testing. Small controlled
 cases alone do not establish readiness at viral-capsid scale.
+
+A repeatable synthetic timing probe is available:
+
+```bash
+python benchmarks/search_shell.py --residues 600 --iterations 30 --repeats 3
+```
+
+It reports timings and remaining violations on a carbon-only shell. This measures
+iteration cost and is not a demonstration of full-capsid convergence.
