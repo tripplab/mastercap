@@ -56,10 +56,11 @@ def make_edges(inner, outer, width):
     return np.linspace(inner, outer, n + 1)
 
 
-def histogram(structure, center, edges, elements):
+def histogram(structure, center, edges, elements, *, atom_elements=None):
     radial = np.linalg.norm(structure.xyz - center, axis=1)
     volume = shell_volumes(edges)
-    return {e: np.histogram(radial[structure.elements == e], bins=edges)[0] / volume for e in elements}
+    atom_elements = structure.elements if atom_elements is None else atom_elements
+    return {e: np.histogram(radial[atom_elements == e], bins=edges)[0] / volume for e in elements}
 
 
 def distance_statistics(structure, percentile=1, min_samples=100):
