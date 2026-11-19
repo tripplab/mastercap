@@ -78,6 +78,13 @@ Protein recognition uses an explicit residue-name list, not a complete chemical
 component database. No biological assembly expansion is performed. Angular
 coverage warnings cannot prove that a capsid is complete.
 
+Reference-analysis warning details, including every inferred element, are kept
+only in JSON (`analysis.warnings` for analysis/generation and diagnostics;
+`warnings` for standalone validation). The terminal shows one summary line with
+the total warning and element-inference counts, including in `--verbose` mode.
+`--quiet` suppresses this summary. Runtime errors and search progress retain
+their existing behavior.
+
 ## Geometry and profiles
 
 The reference center is the unweighted coordinate mean before radial trimming.

@@ -140,6 +140,14 @@ def diagnostic(args, report, protected):
     LOG.error("No new PDB written. Diagnostic: %s", path)
 
 
+def log_warning_summary(warnings):
+    """Keep per-record reference diagnostics in JSON, even in verbose mode."""
+    if warnings:
+        inferred = sum(warning.startswith("Inferred ") for warning in warnings)
+        LOG.warning("Reference analysis: %d warnings (%d element inferences); details only in JSON.",
+                    len(warnings), inferred)
+
+
 def generate_command(args, analysis, source, acquisition, started, names, preparation_timings=None):
     if args.seed is None:
         args.seed = secrets.randbits(63)
@@ -261,6 +269,7 @@ def validate_command(args, source, started, names):
     analysis = analyze(read_pdb(source, saved["analysis"]["reference"]["model"]), **saved["analysis_options"])
     if analysis.structure.provenance["sha256"] != saved["analysis"]["reference"]["sha256"]:
         raise MastercapError("Reference SHA-256 does not match the generation report")
+    log_warning_summary(analysis.warnings)
     actual_hash = hashlib.sha256(args.pdb.read_bytes()).hexdigest()
     if actual_hash != saved["pdb_sha256"]:
         raise MastercapError("Generated PDB SHA-256 does not match its report")
@@ -283,7 +292,8 @@ def validate_command(args, source, started, names):
     status = acceptance(geometry, metrics, config["profile_tolerance"], config["composition_tolerance"])
     report = base_report(args, started)
     report.update({"status": status, "geometry": geometry, "metrics": metrics,
-                   "validated_pdb": str(args.pdb), "reference": analysis.structure.provenance})
+                   "validated_pdb": str(args.pdb), "reference": analysis.structure.provenance,
+                   "warnings": analysis.warnings})
     files = {names["json"]: encode_json(report)}
     extra_profiles(files, names, edges, analysis.original, profiles, metrics["generated_profiles"])
     publish(files, args.overwrite, [source, args.pdb, args.report])
@@ -321,8 +331,7 @@ def run(args):
             diagnostic(args, report, protected)
             return 1
         raise
-    for warning in analysis.warnings:
-        LOG.warning(warning)
+    log_warning_summary(analysis.warnings)
     if args.command == "generate":
         return generate_command(args, analysis, source, acquisition, started, names, preparation_timings)
     report = base_report(args, started)
