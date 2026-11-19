@@ -16,13 +16,44 @@ Linux, Python 3.11 or newer:
 ```bash
 python -m venv .venv
 . .venv/bin/activate
-python -m pip install -e '.[dev]' ó python -m pip install --only-binary=:all: -e '.[dev]'
+python -m pip install -e '.[dev]'
 mastercap --version
 python -m pytest
 ```
 
 NumPy, SciPy and Matplotlib are runtime dependencies. pytest is for development.
 `python -m mastercap` is equivalent to `mastercap`.
+
+To require prebuilt dependency wheels, use this installation command instead:
+
+```bash
+python -m pip install --only-binary=:all: -e '.[dev]'
+```
+
+### Updating an existing installation
+
+From the repository root, save any local edits before switching branches. These
+commands retrieve changes merged into GitHub's `main` branch, activate the existing
+virtual environment, and refresh the installed package and dependencies:
+
+```bash
+git status --short
+git switch main
+git pull --ff-only origin main
+. .venv/bin/activate
+python -m pip install -e '.[dev]'
+# Optional: rebuild Python bytecode for the updated source.
+python -m compileall -q src/mastercap
+mastercap --version
+python -m pytest
+```
+
+The wheel-only installation alternative above also applies when updating.
+mastercap is pure Python and needs no separate native compilation step. Editable
+installation uses the source in this checkout; reinstalling refreshes dependency
+requirements, package metadata, and the CLI entry point. Python normally compiles
+bytecode automatically, so `compileall` is optional. Start a new mastercap process
+after updating to load the new code.
 
 ## Workflows
 
