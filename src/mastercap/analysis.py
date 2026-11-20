@@ -18,6 +18,7 @@ class Analysis:
     neighbor_samples: dict
     warnings: list
     excluded: int
+    smoothing_sigma: float = 0.0
 
     @property
     def inner(self):
@@ -36,6 +37,8 @@ class Analysis:
                 "element_counts": {e: int(np.sum(self.structure.elements == e)) for e in self.original},
                 "excluded_radial_atoms": self.excluded,
                 "warnings": self.warnings,
+                "smoothing": {"enabled": self.smoothing_sigma > 0,
+                              "sigma_angstrom": self.smoothing_sigma},
                 "profiles": {"edges": self.edges.tolist(), "volumes": volumes.tolist(),
                              "original": {e: p.tolist() for e, p in self.original.items()},
                              "smoothed": {e: p.tolist() for e, p in self.smoothed.items()}},
@@ -97,9 +100,11 @@ def distance_statistics(structure, percentile=1, min_samples=100):
 
 
 def analyze(structure, width=1.0, sigma=1.0, radius_method="extrema", percentiles=(0.5, 99.5),
-            distance_percentile=1.0, min_samples=100):
+            distance_percentile=1.0, min_samples=100, progress=None):
     if not np.isfinite([width, sigma]).all() or width <= 0 or sigma < 0:
         raise MastercapError("Bin width must be positive and smoothing sigma nonnegative")
+    if progress:
+        progress("Analyzing reference center, radial bounds and selected atoms")
     center = structure.xyz.mean(axis=0)
     radial = np.linalg.norm(structure.xyz - center, axis=1)
     if radius_method == "percentile":
@@ -112,12 +117,17 @@ def analyze(structure, width=1.0, sigma=1.0, radius_method="extrema", percentile
     selected = structure.subset((radial >= inner) & (radial <= outer)).relabel()
     if len(selected.atoms) < 2:
         raise MastercapError("Fewer than two atoms remain in the selected radial region")
+    if progress:
+        progress(f"Computing radial profiles: bin width <= {width:g} A; "
+                 +(f"Gaussian sigma {sigma:g} A" if sigma else "smoothing disabled"))
     original = histogram(selected, center, edges, sorted(set(selected.elements)))
     volume = shell_volumes(edges)
     smooth = {}
     for e, profile in original.items():
         filtered = gaussian_filter1d(profile, sigma / np.diff(edges)[0], mode="reflect") if sigma else profile.copy()
         smooth[e] = filtered * (np.sum(profile * volume) / np.sum(filtered * volume))
+    if progress:
+        progress("Estimating element-pair nearest-neighbor distance limits")
     limits, samples = distance_statistics(selected, distance_percentile, min_samples)
     warnings = selected.warnings.copy()
     warnings.append("Input is assumed to contain an already expanded complete capsid; assembly was not reconstructed")
@@ -131,7 +141,7 @@ def analyze(structure, width=1.0, sigma=1.0, radius_method="extrema", percentile
     excluded = len(structure.atoms) - len(selected.atoms)
     if excluded:
         warnings.append(f"Excluded {excluded} atoms outside selected radial interval; residues may be partial")
-    return Analysis(selected, center, edges, original, smooth, limits, samples, warnings, excluded)
+    return Analysis(selected, center, edges, original, smooth, limits, samples, warnings, excluded, sigma)
 
 
 def target_profiles(analysis, inner=None, outer=None):

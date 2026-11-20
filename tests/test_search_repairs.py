@@ -34,7 +34,7 @@ def test_initialization_does_not_spend_repair_budget(small_structure, monkeypatc
     monkeypatch.setattr(generation, "initialize", slow_initialize)
     structure, analysis, edges, profiles, rng = prepared(small_structure)
     output, report = search(structure, analysis, edges, profiles, analysis.center, rng,
-                            max_iterations=100, time_limit=1)
+                            max_iterations=100, time_limit=1, refine_iterations=0)
     assert output is not None
     assert report["iterations"] > 0
     assert report["preparation_seconds"] == 1000

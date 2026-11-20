@@ -1,7 +1,10 @@
 """Fixed-column PDB input and TER-segmented output."""
 import gzip
 import hashlib
+import json
+import logging
 import re
+import ssl
 import string
 import tempfile
 from datetime import datetime, timezone
@@ -10,6 +13,9 @@ from urllib.request import Request, urlopen
 import numpy as np
 
 from .model import Atom, Structure, MastercapError, PROTEIN, VDW
+from . import __version__
+
+LOG = logging.getLogger("mastercap")
 
 
 def content(path):
@@ -23,17 +29,33 @@ def content(path):
         raise MastercapError("Coordinate input must be ASCII PDB content") from exc
 
 
-def download(identifier, cache_dir, refresh=False):
+def download(identifier, cache_dir, refresh=False, *, no_check_certificate=False):
     if not re.fullmatch(r"[A-Za-z0-9]{4}", identifier):
         raise MastercapError("A VIPERdb identifier must contain four alphanumeric characters")
     identifier = identifier.lower()
     directory = Path(cache_dir).expanduser()
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / f"{identifier}_full.vdb.gz"
+    receipt = directory / f"{identifier}_full.vdb.gz.download.json"
     url = f"https://viperdb.org/resources/OLIGOMERS/{identifier}_full.vdb.gz"
-    if refresh or not target.exists():
+    cached_tls = None
+    if target.exists() and receipt.exists():
         try:
-            with urlopen(Request(url, headers={"User-Agent": "mastercap/0.1"}), timeout=60) as response:
+            prior = json.loads(receipt.read_text())
+            if prior.get("sha256") == hashlib.sha256(target.read_bytes()).hexdigest():
+                cached_tls = prior.get("tls_certificate_verified")
+        except (OSError, ValueError, AttributeError):
+            pass  # Legacy/changed cache content has unknown TLS provenance.
+    cache_reused = not refresh and target.exists() and not (cached_tls is False and not no_check_certificate)
+    if not cache_reused:
+        LOG.info("Downloading expanded coordinates from %s", url)
+        temporary = None
+        try:
+            options = {}
+            if no_check_certificate:
+                LOG.warning("TLS certificate verification disabled for this VIPERdb download (--no-check-certificate)")
+                options["context"] = ssl._create_unverified_context()
+            with urlopen(Request(url, headers={"User-Agent": f"mastercap/{__version__}"}), timeout=60, **options) as response:
                 data = response.read()
             text = gzip.decompress(data).decode("ascii")
             if not any(line.startswith("ATOM  ") for line in text.splitlines()):
@@ -42,10 +64,20 @@ def download(identifier, cache_dir, refresh=False):
                 temporary = Path(stream.name)
                 stream.write(data)
             temporary.replace(target)
+            cached_tls = not no_check_certificate
+            receipt.write_text(json.dumps({"sha256": hashlib.sha256(data).hexdigest(),
+                                           "tls_certificate_verified": cached_tls}))
         except Exception as exc:
             raise MastercapError(f"VIPERdb download failed for {url}: {exc}") from exc
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    else:
+        LOG.info("Using cached VIPERdb coordinates: %s", target)
     content(target)  # Also verify existing cached gzip files.
     return target, {"url": url, "cache_path": str(target),
+                    "cache_reused": cache_reused, "tls_certificate_verified": cached_tls,
+                    "tls_verification_requested": not no_check_certificate,
                     "acquired_utc": datetime.fromtimestamp(target.stat().st_mtime, timezone.utc).isoformat()}
 
 
