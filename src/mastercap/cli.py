@@ -24,6 +24,109 @@ from .reports import encode_json, preflight, publish, profile_csv, profile_png
 LOG = logging.getLogger("mastercap")
 
 
+class DetailedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+    """Show concrete defaults and preserve readable examples and explanations."""
+
+    inferred_defaults = {
+        "inner_radius": "inferred from the reference",
+        "outer_radius": "inferred from the reference",
+        "seed": "generate a seed and record it in JSON",
+        "profile_tolerance": "unset (uncalibrated)",
+        "composition_tolerance": "unset (uncalibrated)",
+    }
+
+    def _get_help_string(self, action):
+        if action.default is None:
+            explanation = self.inferred_defaults.get(action.dest)
+            if explanation:
+                return f"{action.help} (default: {explanation})"
+            return action.help
+        return super()._get_help_string(action)
+
+
+class CompleteHelpParser(argparse.ArgumentParser):
+    """Top-level help includes real child parsers, so options cannot drift."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.command_parsers = []
+
+    def format_help(self):
+        text = super().format_help()
+        for command in self.command_parsers:
+            text += "\n"+"="*72+"\n"+command.format_help()
+        return text
+
+
+COMMAND_EXAMPLES = {
+    "analyze": """Examples:
+  mastercap analyze --input ./1cwp_full.vdb.gz --output-prefix results/reference --csv --plot
+  mastercap analyze --id 1cwp --output-prefix results/1cwp
+  mastercap analyze --input reference.pdb --radius-method percentile --radius-percentiles 0.5 99.5 --output-prefix results/trimmed
+
+Input and output:
+  Supply an already expanded, complete protein capsid. No symmetry expansion,
+  missing-atom reconstruction or hydrogen addition is performed. Occupancy is
+  ignored; HETATM and nonprotein records are excluded; alternate positions fail.
+  --input and --id are mutually exclusive. Downloads use VIPERdb with TLS checks.
+  Writes PREFIX.json and, when requested, PREFIX_profiles.csv / .png; no PDB.
+  Element-inference and other reference warnings stay in JSON, with one terminal
+  summary (suppressed by --quiet).""",
+    "generate": """Examples:
+  mastercap generate --input ./1cwp_full.vdb.gz --output-prefix results/particle --seed 42 --allow-approximate --csv --plot
+  mastercap generate --id 1cwp --output-prefix results/particle --seed 42 --allow-approximate
+  mastercap generate --input reference.pdb --inner-radius 100 --outer-radius 130 --mode residue --distribution regular --output-prefix results/resized --seed 42 --allow-approximate
+
+Workflow and defaults:
+  Automatically ANALYZE -> GENERATE -> WRITE/REREAD PDB -> VALIDATE.
+  By default, keep reference radii and center, use independent atoms and random
+  initialization, and smooth radial profiles with the provisional 1 A sigma.
+  Radii bound atom centers, not the outer surfaces of their vdW spheres.
+  The 300 s repair budget excludes preparation; authorized fallback shares the
+  remaining repair time. Individual repair operations can overrun the deadline.
+
+Acceptance:
+  Always require radial bounds, center error <= 1 A, applicable minimum distances,
+  internal residue connectivity and global connectivity by positive vdW overlap.
+  Unset profile/composition tolerances produce an uncalibrated result; saving it
+  requires --allow-approximate. With tolerances, each element must pass to be valid.
+  Profile error = sum(abs(generated density - target density) * shell volume)
+                  / target element count.
+  Composition tolerance is relative, with a minimum allowance of one atom.
+  These quality tolerances have no scientifically calibrated defaults.
+  --allow-approximate NEVER permits violation of mandatory geometry/connectivity.
+
+Output:
+  Writes PREFIX.pdb and PREFIX.json after final written/reread validation;
+  optional profiles use PREFIX_profiles.csv / .png. A failure writes a separate
+  PREFIX.diagnostic.json when possible, without publishing an invalid PDB.
+  One PDB uses TER-separated segments; serials/chains can repeat in large files.
+  JSON atom order/provenance is authoritative. This is a geometric model, not a
+  chemically valid protein or force-field-ready structure.""",
+    "validate": """Examples:
+  mastercap validate --input ./1cwp_full.vdb.gz --pdb results/particle.pdb --report results/particle.json --output-prefix results/validation
+  mastercap validate --id 1cwp --pdb results/particle.pdb --report results/particle.json --output-prefix results/validation --csv --plot
+
+Validation:
+  The matching generation JSON and original reference content are required.
+  Recompute analysis, verify reference/PDB hashes and atom provenance, and check
+  rounded-coordinate geometry, connectivity, composition and radial profiles.
+  Model, radii, smoothing, mode and quality tolerances come from --report.
+  Plain and gzip references are interchangeable if decompressed content matches.
+  Writes PREFIX.json and optional PREFIX_profiles.csv / .png; never generates a PDB.
+  An uncalibrated status means mandatory checks passed but quality tolerances
+  were not supplied; standalone validation cannot retroactively calibrate them.""",
+}
+
+EXIT_HELP = """
+Exit codes:
+  0    Analysis completed, or generated/validated result passes supplied tolerances.
+  1    Input, search, validation or output failure.
+  2    Approximate/uncalibrated result saved or verified; also CLI usage errors.
+  130  Interrupted.
+"""
+
+
 def finite_nonnegative(value):
     number = float(value)
     if not np.isfinite(number) or number < 0:
@@ -46,52 +149,63 @@ def positive_integer(value):
 
 
 def parser():
-    result = argparse.ArgumentParser(prog="mastercap", description="Reference-driven spherical geometric capsid particles. All distances are in angstroms.")
-    result.add_argument("--version", action="version", version=__version__)
+    result = CompleteHelpParser(
+        prog="mastercap", formatter_class=DetailedHelpFormatter,
+        description="Reference-driven spherical geometric capsid particles. All distances are in angstroms.\n"
+                    "This help includes ALL command options, defaults and examples below.\n"
+                    "Use mastercap COMMAND -h for a shorter, command-specific reference.",
+        epilog="Choose analyze, generate or validate. generate includes analysis and final validation.\n"
+               "Concrete defaults are shown beside options; inferred/unset defaults are explained.\n"
+               "Run from an environment where mastercap and its dependencies are installed.\n"+EXIT_HELP)
+    result.add_argument("--version", action="version", version=__version__, help="Print the installed mastercap version and exit")
     sub = result.add_subparsers(dest="command", required=True)
     for name in ("analyze", "generate", "validate"):
         description = {"analyze": "Analyze an already expanded protein capsid; no coordinates are generated.",
                        "generate": "Automatically ANALYZE reference -> GENERATE -> WRITE AND REREAD PDB -> VALIDATE. No separate analyze/validate commands are needed.",
                        "validate": "Independently reanalyze the reference and validate an existing PDB using its mandatory JSON report."}[name]
-        command = sub.add_parser(name, help=description, description=description)
+        command = sub.add_parser(name, help=description, description=description,
+                                 formatter_class=DetailedHelpFormatter,
+                                 epilog=COMMAND_EXAMPLES[name]+"\n"+EXIT_HELP)
+        result.command_parsers.append(command)
         source = command.add_mutually_exclusive_group(required=True)
-        source.add_argument("--input", type=Path, help="Local expanded .pdb/.vdb, optionally gzip compressed")
-        source.add_argument("--id", help="Four-character VIPERdb identifier, e.g. 1cwp")
-        command.add_argument("--model", type=positive_integer, default=1, help="Reference model number (default: 1); ignored by validate, which uses saved settings")
+        source.add_argument("--input", type=Path, help="Local expanded .pdb/.vdb, optionally gzip compressed; required alternative to --id")
+        source.add_argument("--id", help="Four-character VIPERdb identifier, e.g. 1cwp; required alternative to --input")
+        model_help = "Reference MODEL number to read" if name != "validate" else "Ignored here: the reference MODEL number saved in --report is used"
+        command.add_argument("--model", type=positive_integer, default=1, help=model_help)
         command.add_argument("--cache-dir", type=Path, default=Path(os.environ.get("XDG_CACHE_HOME", Path.home()/".cache"))/"mastercap", help="VIPERdb cache directory (honors XDG_CACHE_HOME)")
-        command.add_argument("--refresh", action="store_true", help="Refresh the requested VIPERdb cache entry")
-        command.add_argument("--output-prefix", type=Path, required=True, help="Output basename; extensions are appended")
-        command.add_argument("--csv", action="store_true", help="Write radial density CSV")
-        command.add_argument("--plot", action="store_true", help="Write radial density PNG")
+        command.add_argument("--refresh", action="store_true", help="Download a fresh VIPERdb cache entry instead of reusing the existing one; applies to --id")
+        command.add_argument("--output-prefix", type=Path, required=True, help="Required output basename, e.g. results/particle; extensions are appended and parent directories created")
+        command.add_argument("--csv", action="store_true", help="Write radial density profiles to PREFIX_profiles.csv")
+        command.add_argument("--plot", action="store_true", help="Write radial density comparison plots to PREFIX_profiles.png")
         command.add_argument("--overwrite", action="store_true", help="Explicitly permit replacing existing output files")
         verbosity = command.add_mutually_exclusive_group()
-        verbosity.add_argument("--quiet", action="store_true")
-        verbosity.add_argument("--verbose", action="store_true")
+        verbosity.add_argument("--quiet", action="store_true", help="Suppress progress and warning summaries; errors are still printed")
+        verbosity.add_argument("--verbose", action="store_true", help="Enable detailed runtime logging; per-record reference warnings remain only in JSON")
         if name != "validate":
-            command.add_argument("--bin-width", type=finite_positive, default=1.0, help="Requested maximum radial bin width in A (default: 1)")
-            command.add_argument("--smoothing-sigma", type=finite_nonnegative, default=1.0, help="Gaussian width in A (provisional default: 1; not calibrated)")
-            command.add_argument("--no-smoothing", action="store_true")
-            command.add_argument("--radius-method", choices=("extrema", "percentile"), default="extrema")
-            command.add_argument("--radius-percentiles", nargs=2, type=float, default=[0.5, 99.5], metavar=("LOW", "HIGH"))
-            command.add_argument("--distance-percentile", type=finite_nonnegative, default=1.0, help="Lower distance percentile (default: 1)")
-            command.add_argument("--min-pair-samples", type=positive_integer, default=100, help="Observations needed before using a pair-specific percentile (provisional: 100)")
+            command.add_argument("--bin-width", type=finite_positive, default=1.0, help="Requested maximum radial shell-bin width in A; must be positive")
+            command.add_argument("--smoothing-sigma", type=finite_nonnegative, default=1.0, help="Gaussian radial smoothing sigma in A; provisional, not calibrated; overridden by --no-smoothing")
+            command.add_argument("--no-smoothing", action="store_true", help="Disable Gaussian smoothing and use the original binned reference profile")
+            command.add_argument("--radius-method", choices=("extrema", "percentile"), default="extrema", help="Infer reference bounds from minimum/maximum radii or the selected radial percentiles")
+            command.add_argument("--radius-percentiles", nargs=2, type=float, default=[0.5, 99.5], metavar=("LOW", "HIGH"), help="Lower/upper radial percentiles, 0 <= LOW < HIGH <= 100; only used with --radius-method percentile; excluded atoms are reported")
+            command.add_argument("--distance-percentile", type=finite_nonnegative, default=1.0, help="Nearest-neighbor percentile in [0, 100] for element-pair minimum distances; provisional")
+            command.add_argument("--min-pair-samples", type=positive_integer, default=100, help="Minimum observations for a pair-specific distance percentile; fewer use grouped normalized reference distances; provisional")
         if name == "generate":
-            command.add_argument("--inner-radius", type=finite_nonnegative)
-            command.add_argument("--outer-radius", type=finite_positive)
-            command.add_argument("--center", choices=("reference", "origin"), default="reference")
-            command.add_argument("--mode", choices=("independent", "residue"), default="independent")
-            command.add_argument("--distribution", choices=("random", "regular"), default="random")
-            command.add_argument("--seed", type=int, help="Nonnegative seed; recorded random seed when omitted")
-            command.add_argument("--max-iterations", type=int, default=1000, help="Maximum repair iterations (provisional: 1000)")
-            command.add_argument("--time-limit", type=finite_positive, default=300.0, help="Cooperative repair-search budget in seconds, shared with fallback; excludes input, analysis, inventory and initialization (default: 300)")
-            command.add_argument("--overlap-margin", type=finite_nonnegative, default=0.0, help="Required positive vdW overlap beyond this margin in A")
-            command.add_argument("--profile-tolerance", type=finite_nonnegative, help="Maximum normalized integrated error for EACH element; no calibrated default")
-            command.add_argument("--composition-tolerance", type=finite_nonnegative, help="Relative count tolerance per element, with one-atom rounding allowance; no calibrated default")
+            command.add_argument("--inner-radius", type=finite_nonnegative, help="Inner atom-center radius in A; require 0 <= inner < outer")
+            command.add_argument("--outer-radius", type=finite_positive, help="Outer atom-center radius in A; overrides do not change local density targets")
+            command.add_argument("--center", choices=("reference", "origin"), default="reference", help="Target center: reference coordinate mean or origin (0, 0, 0)")
+            command.add_argument("--mode", choices=("independent", "residue"), default="independent", help="Move individual atoms (independent) or preserve observed residue geometry with rigid moves (residue)")
+            command.add_argument("--distribution", choices=("random", "regular"), default="random", help="Random isotropic or regular spherical-layer initialization; repair may move initial positions")
+            command.add_argument("--seed", type=int, help="Nonnegative random seed for reproducible generation")
+            command.add_argument("--max-iterations", type=int, default=1000, help="Maximum repair steps per attempt; nonnegative, provisional")
+            command.add_argument("--time-limit", type=finite_positive, default=300.0, help="Cooperative repair-search budget in seconds, shared with fallback; excludes input, analysis, inventory and initialization")
+            command.add_argument("--overlap-margin", type=finite_nonnegative, default=0.0, help="Extra required vdW overlap in A; must be nonnegative and tangency never qualifies")
+            command.add_argument("--profile-tolerance", type=finite_nonnegative, help="Maximum normalized integrated radial error for EACH element; no scientifically calibrated value")
+            command.add_argument("--composition-tolerance", type=finite_nonnegative, help="Relative per-element atom-count error limit, with a minimum one-atom allowance")
             command.add_argument("--allow-approximate", action="store_true", help="Permit soft-tolerance deviations or uncalibrated results; mandatory constraints may NEVER be relaxed")
             command.add_argument("--allow-independent-fallback", action="store_true", help="Explicitly allow retrying a failed rigid-residue search in independent mode")
         if name == "validate":
-            command.add_argument("--pdb", type=Path, required=True, help="Generated particle PDB")
-            command.add_argument("--report", type=Path, required=True, help="Matching mastercap JSON report")
+            command.add_argument("--pdb", type=Path, required=True, help="Required generated particle PDB to revalidate")
+            command.add_argument("--report", type=Path, required=True, help="Required JSON report from the matching successful generation")
     return result
 
 
