@@ -110,6 +110,21 @@ Downloads use `https://viperdb.org/resources/OLIGOMERS/{id}_full.vdb.gz` with TL
 verification enabled. `--refresh` updates a cached file. gzip integrity and ATOM
 presence are checked. Cloud network settings must allow `viperdb.org`.
 
+The downloader uses Python's `urllib.request`, not wget. For an explicitly
+requested download without certificate verification, use:
+
+```bash
+mastercap analyze --id 1cwp --no-check-certificate --refresh --output-prefix results/1cwp
+```
+
+`--no-check-certificate` skips TLS server-identity verification only for VIPERdb
+downloads; the default continues to verify certificates. It has no effect on a
+local `--input`, and does not fix HTTP 403 responses or network-policy denials.
+An actual unchecked download prints a warning. Download provenance records the
+verification mode and a hash-matched cache receipt; legacy caches have unknown
+TLS provenance. A later default request re-downloads a known unchecked cache
+using verified TLS. gzip/coordinate checks do not authenticate the remote server.
+
 ## Input selection
 
 * Only recognized protein residues in ATOM records of the selected model are used.
@@ -149,6 +164,33 @@ with a **provisional, uncalibrated** sigma of 1 A. Use `--smoothing-sigma` or
 `--no-smoothing`. Renormalization conserves integrated element counts, confines
 the smoothed profile to the interval, and keeps densities nonnegative.
 
+`--smoothing-sigma` is the Gaussian standard deviation in **A**, not bins. A
+higher value smooths more, broadens peaks, and suppresses narrow fluctuations.
+The implementation converts it to bin units using the actual bin width.
+`--smoothing-sigma 0` disables Gaussian filtering too.
+
+`--no-smoothing` overrides any supplied sigma and uses an exact copy of the
+original **binned** profile as the target. The PNG then shows the original mapped
+profile and generated profile, omitting the redundant "Smoothed target" curve.
+Standalone validation plots honor the effective setting saved during generation.
+CSV keeps generic original/target columns, and the JSON's legacy `smoothed` array
+remains for compatibility (equal to the original when disabled); the effective
+state is explicit in `analysis.smoothing` and `analysis_options.sigma`.
+
+Binning still applies without Gaussian smoothing. For example, `--bin-width 4`
+uses coarser layers than 1 A and can hide narrow features or reduce the reported
+error. Compare runs at the same bin width. With unchanged geometry, generation
+seeks the original binned profile; changing radii maps that profile to the new
+interval. Neither option guarantees an exact profile match under integer-count,
+residue, distance and connectivity constraints.
+
+```bash
+mastercap generate --input ./1cwp_full.vdb --output-prefix results/particle03 \
+  --mode independent --distribution regular --bin-width 4 --no-smoothing \
+  --time-limit 600 --seed 42 --allow-approximate --csv --plot \
+  --progress-interval 5 --refine-iterations 100
+```
+
 Either radius may be overridden. Profiles map by relative position through the
 thickness while retaining local number density; atom counts change with volume.
 Different element profiles can produce changed global fractions after resizing.
@@ -180,6 +222,18 @@ residues. The contact forest proposes moves; it is not proof of connectivity.
 Rigid updates use Kabsch projection. Mandatory
 repairs precede soft profile improvement. The search is heuristic, not a physical
 simulation, and does not guarantee convergence or final angular isotropy.
+
+After first feasible geometry, search now attempts up to `--refine-iterations`
+additional steps (default **100**), including any repairs needed after profile
+moves. This fixes first-feasible stopping that previously skipped element-profile
+refinement when tolerances were unset. Set it to **0** for the earlier behavior.
+Refinement shares the same time and maximum-iteration limits, can stop earlier
+when supplied quality tolerances pass, and always retains the best feasible
+candidate. Ranking first minimizes the worst relative element error, then the
+mean element error, then aggregate error, so rare elements are not judged only
+by their contribution to total density. Deterministic, volume-aware radial
+quantiles avoid adding fresh sampling noise to refinement targets. Constraints
+can still prevent improvement; full-capsid quality requires measurement.
 
 Every exported particle must satisfy after PDB rounding and rereading:
 
@@ -216,12 +270,22 @@ export/validation. Preparation is an aggregate, not an additional phase to sum
 with its subphases. `search.elapsed_seconds` measures only the reported attempt's
 repair search; `search.preparation_seconds` measures its initialization/metadata
 setup. `timings_seconds.search` includes both attempts when fallback occurs.
-`search.termination` is `time_limit`, `iteration_limit`, or `constraints_satisfied`.
+`search.termination` is `time_limit`, `iteration_limit`, `constraints_satisfied`,
+or `refinement_complete`. The latter means the refinement-step allowance was
+used, not that scientifically calibrated quality criteria passed.
 `iterations` counts completed repair updates; `candidate_iteration` identifies
 the selected feasible candidate, which can precede termination. Search may end
 at a limit while still returning a previously feasible approximate candidate.
 v1 does not resume interrupted runs. Search failure is not proof of mathematical
 infeasibility.
+
+INFO messages announce reference acquisition, reading, analysis, inventory,
+initialization, repair/refinement, final PDB checks, plotting and JSON output.
+Progress is printed at iteration 0, every **5** iterations by default, and at
+termination. Use `--progress-interval N` (positive integer) to change the cadence;
+`--quiet` suppresses stage/progress messages. Progress includes isolated atoms,
+disconnected residues and worst-element error alongside the aggregate error.
+The final selected candidate's iteration and per-element errors are also logged.
 
 Static element/radius/residue metadata is cached per inventory. Each search
 iteration computes one neighbor/overlap graph on PDB-rounded coordinates and
@@ -235,6 +299,10 @@ Reports include original, smoothed and generated profiles; element counts;
 integrated profile errors; geometry and graph checks; nearest-distance percentile
 comparisons; provenance; residue transformations/deformation RMSD; seed; software
 versions; elapsed time; and Linux process peak RSS.
+Search metadata also records the first feasible iteration, refinement steps,
+actual profile updates and the selected candidate's iteration. Candidate geometry
+and metrics describe the selected feasible output, which may precede the final
+search iteration.
 
 The primary per-element profile error is:
 `sum(abs(generated_density - target_density) * shell_volume) / target_count`.

@@ -39,6 +39,20 @@ consume the cooperative repair budget; explicit fallback shares only remaining
 repair time. Reports distinguish time and iteration exhaustion and record phase
 timings. See README for report field semantics.
 
+Once geometry is feasible, bounded profile refinement is attempted even without
+quality tolerances. Keep the best feasible candidate, rank errors by worst/mean
+relative element error before aggregate error, and use volume-aware deterministic
+quantiles as radial targets. Refinement can re-enter repair and is bounded by
+the shared search limits; `--refine-iterations 0` selects first-feasible stopping.
+Smoothing metadata controls plot legends, including when validation reads an
+older generation report through its saved effective sigma.
+
+VIPERdb requests use urllib with certificate verification by default. The explicit
+`--no-check-certificate` option is limited to downloads and recorded in provenance;
+it is never an automatic retry on certificate errors. Cache receipts bind the
+recorded TLS mode to content hashes; an unchecked cached download is not silently
+reused by a later verified request.
+
 Schema-v1 generation JSON includes analysis settings, reference hash, profiles,
 target geometry, effective mode, inventory, atom mapping, transforms, checks,
 metrics, PDB hash and execution metadata. Independent validation recomputes the

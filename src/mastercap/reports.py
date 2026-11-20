@@ -82,7 +82,7 @@ def profile_csv(edges, original, smoothed, generated=None):
     return stream.getvalue().encode()
 
 
-def profile_png(edges, original, smoothed, generated=None):
+def profile_png(edges, original, smoothed, generated=None, *, smoothing_enabled=True):
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     figure = Figure(figsize=(9, 2.5*(len(smoothed)+1)), layout="constrained")
@@ -93,10 +93,11 @@ def profile_png(edges, original, smoothed, generated=None):
     for axis, name in zip(axes, names):
         def values(profiles):
             return sum(np.asarray(v) for v in profiles.values()) if name == "Total" else profiles[name]
-        axis.plot(mid, values(original), label="Original (mapped)", alpha=0.65)
-        axis.plot(mid, values(smoothed), label="Smoothed target")
+        axis.plot(mid, values(original), label="Original (mapped)", alpha=0.65, color="C0")
+        if smoothing_enabled:
+            axis.plot(mid, values(smoothed), label="Smoothed target", color="C1")
         if generated:
-            axis.plot(mid, values(generated), label="Generated")
+            axis.plot(mid, values(generated), label="Generated", color="C2")
         axis.set(title=name, xlabel="Radius (angstrom)", ylabel="Atoms / angstrom³")
         axis.legend()
     stream = io.BytesIO()

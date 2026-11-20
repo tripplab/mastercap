@@ -81,6 +81,21 @@ def sample_radii(profile, edges, n, rng):
     return (edges[bins]**3 + rng.random(n) * (edges[bins+1]**3-edges[bins]**3))**(1/3)
 
 
+def profile_quantiles(profile, edges, n):
+    """Deterministic, volume-aware radial targets without sampling noise."""
+    if n == 0:
+        return np.array([], dtype=float)
+    weights = profile*shell_volumes(edges)
+    if weights.sum() <= 0:
+        raise MastercapError("Cannot refine an empty element profile")
+    cumulative = np.cumsum(weights)/weights.sum()
+    u = (np.arange(n)+0.5)/n
+    bins = np.minimum(np.searchsorted(cumulative, u, side="right"), len(weights)-1)
+    lower = np.r_[0.0, cumulative[:-1]]
+    fraction = (u-lower[bins])/(cumulative[bins]-lower[bins])
+    return (edges[bins]**3+fraction*(edges[bins+1]**3-edges[bins]**3))**(1/3)
+
+
 def initialize(structure, analysis, edges, profiles, center, rng, mode, distribution, *, groups=None):
     groups = residue_groups(structure) if groups is None else groups
     n = len(groups)
@@ -248,10 +263,13 @@ def characteristic_forces(force, structure, analysis, metadata):
 
 def search(structure, analysis, edges, profiles, center, rng, mode="independent",
            distribution="random", max_iterations=1000, time_limit=300.0, margin=0.0,
-           profile_tolerance=None, composition_tolerance=None, progress=None):
+           profile_tolerance=None, composition_tolerance=None, progress=None,
+           progress_interval=5, refine_iterations=100, stage_progress=None):
     preparation_started = time.monotonic()
-    if max_iterations < 0 or time_limit <= 0 or margin < 0:
-        raise MastercapError("Iterations and overlap margin must be nonnegative; time limit positive")
+    if max_iterations < 0 or time_limit <= 0 or margin < 0 or refine_iterations < 0 or progress_interval < 1:
+        raise MastercapError("Iterations, refinement steps and overlap margin must be nonnegative; time/progress interval positive")
+    if stage_progress:
+        stage_progress("Building inventory metadata and initializing particle coordinates")
     metadata = GeometryMetadata.build(structure, analysis.limits)
     groups = list(metadata.groups.values())
     rotations = initialize(structure, analysis, edges, profiles, center, rng, mode, distribution, groups=groups)
@@ -262,14 +280,17 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     quantiles = {}
     for e, profile in profiles.items():
         indices = metadata.element_indices[e]
-        # Fixed order statistics avoid introducing fresh noise each iteration.
-        quantiles[e] = np.sort(sample_radii(profile, edges, len(indices), rng))
-    best, best_key = None, (float("inf"), float("inf"))
+        quantiles[e] = profile_quantiles(profile, edges, len(indices))
+    best, best_key = None, (float("inf"),)*4
+    first_feasible = None
+    profile_updates = 0
     last_report = None
     preparation_seconds = time.monotonic()-preparation_started
     # The repair budget starts only after inventory-dependent initialization.
     started = time.monotonic()
     termination = "iteration_limit"
+    if stage_progress:
+        stage_progress("Starting geometric repair and element-profile search")
     for iteration in range(max_iterations+1):
         # All feasibility decisions use the same precision as exported PDB.
         candidate = Structure(structure.atoms, np.round(structure.xyz, 3),
@@ -282,19 +303,29 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         last_report = {"geometry": geometry, "metrics": metrics, "status": status,
                        "iterations": iteration, "elapsed_seconds": time.monotonic()-started}
         if geometry["mandatory_pass"]:
-            key = (metrics["total_profile_error"], sum(abs(m["count_difference"]) for m in metrics["elements"].values()))
+            if first_feasible is None:
+                first_feasible = iteration
+                if stage_progress and refine_iterations and status != "valid":
+                    stage_progress(f"Geometry feasible at iteration {iteration}; refining per-element profiles "
+                                   f"for up to {refine_iterations} additional steps within remaining search limits")
+            errors = [m["profile_error"] or 0.0 for m in metrics["elements"].values()]
+            key = (max(errors), float(np.mean(errors)), metrics["total_profile_error"],
+                   sum(abs(m["count_difference"]) for m in metrics["elements"].values()))
             if key < best_key:
                 best, best_key = (candidate, last_report.copy()), key
-            if status == "valid" or status == "uncalibrated":
-                termination = "constraints_satisfied"
-                break
-        if progress and iteration % 25 == 0:
+        reason = None
+        if status == "valid" or (geometry["mandatory_pass"] and refine_iterations == 0):
+            reason = "constraints_satisfied"
+        elif first_feasible is not None and iteration-first_feasible >= refine_iterations:
+            reason = "refinement_complete"
+        elif time.monotonic()-started >= time_limit:
+            reason = "time_limit"
+        elif iteration == max_iterations:
+            reason = "iteration_limit"
+        if progress and (iteration % progress_interval == 0 or reason is not None):
             progress(iteration, geometry, metrics)
-        if time.monotonic()-started >= time_limit:
-            termination = "time_limit"
-            break
-        if iteration == max_iterations:
-            termination = "iteration_limit"
+        if reason is not None:
+            termination = reason
             break
         force = np.zeros_like(structure.xyz)
         repair = local["distances"] < local["lower"]+0.003
@@ -328,6 +359,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                 indices = metadata.element_indices[e]
                 order = indices[np.argsort(radial[indices], kind="stable")]
                 force[order] += 0.015*(target_radial-radial[order])[:, None]*direction[order]
+            profile_updates += 1
         force += (center-structure.xyz.mean(axis=0))*0.1
         if geometry["mandatory_pass"]:
             characteristic_forces(force, structure, analysis, metadata)
@@ -343,6 +375,10 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     report["iterations"] = iteration
     report["termination"] = termination
     report["candidate_available"] = output is not None
+    report["first_feasible_iteration"] = first_feasible
+    report["refinement_steps"] = iteration-first_feasible if first_feasible is not None else 0
+    report["profile_updates"] = profile_updates
+    report["profile_error_objective"] = "worst_element_then_mean"
     report["initial_transforms"] = rotations
     return output, report
 
