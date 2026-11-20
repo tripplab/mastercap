@@ -325,11 +325,15 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
         report["residue_inventory"] = trace
         def progress(iteration, geometry, metrics):
             worst = max(m["profile_error"] or 0 for m in metrics["elements"].values())
+            suffix = ""
+            if geometry.get("final_search_state"):
+                suffix = (" (final search state; not the exported candidate)" if geometry.get("export_candidate_available")
+                          else " (final search state; no feasible candidate to export)")
             LOG.info("Iteration %d: components=%d isolated=%d distance violations=%d radial violations=%d "
-                     "disconnected residues=%d center error=%.3f A profile error=%.4f max element error=%.4f", iteration,
+                     "disconnected residues=%d center error=%.3f A profile error=%.4f max element error=%.4f%s", iteration,
                      geometry["global_components"], geometry["isolated_atoms"], geometry["distance_violations"],
                      geometry["outside_radial_bounds"], len(geometry["disconnected_residues"]),
-                     geometry["center_error_angstrom"], metrics["total_profile_error"], worst)
+                     geometry["center_error_angstrom"], metrics["total_profile_error"], worst, suffix)
         mode = args.mode
         def attempt(search_mode):
             attempt_started = time.monotonic()
@@ -366,6 +370,10 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
         timings["preparation"] = time.monotonic()-started-timings["search"]
         LOG.info("Preparation %.3f s; repair search %.3f s / %.3f s; termination=%s",
                  timings["preparation"], timings["search"], args.time_limit, search_report.get("termination", "preparation_error"))
+        recoveries = [p["recovery_iterations"] for p in search_report.get("push_history", []) if p.get("recovery_iterations") is not None]
+        LOG.info("Feasible iterations=%d; profile pushes=%d; median repair iterations=%s",
+                 len(search_report.get("feasible_iterations", [])), len(search_report.get("push_history", [])),
+                 f"{np.median(recoveries):g}" if recoveries else "n/a")
         if particle is None:
             raise MastercapError(f"Search ended ({search_report.get('termination', 'preparation_error')}) without a candidate satisfying every mandatory constraint")
         LOG.info("Selected feasible candidate from iteration %d; preparing PDB export", search_report["candidate_iteration"])

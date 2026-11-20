@@ -284,6 +284,9 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     best, best_key = None, (float("inf"),)*4
     first_feasible = None
     profile_updates = 0
+    feasible_iterations, push_history, best_history = [], [], []
+    initial_metrics = None
+    pending_push = None
     last_report = None
     preparation_seconds = time.monotonic()-preparation_started
     # The repair budget starts only after inventory-dependent initialization.
@@ -299,10 +302,25 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         geometry = validate_geometry(candidate, center, edges, analysis.limits, margin, mode,
                                      local=local, metadata=metadata)
         metrics = profile_metrics(candidate, center, edges, profiles, analysis.original, metadata=metadata)
+        if initial_metrics is None:
+            initial_metrics = {"total_profile_error": metrics["total_profile_error"], "elements": metrics["elements"]}
+        if pending_push is not None:
+            if "damage" not in pending_push:
+                pending_push["damage"] = {"iteration": iteration,
+                    "distance_violations": geometry["distance_violations"],
+                    "global_components": geometry["global_components"],
+                    "disconnected_residues": len(geometry["disconnected_residues"]),
+                    "outside_radial_bounds": geometry["outside_radial_bounds"],
+                    "mandatory_pass": geometry["mandatory_pass"]}
+            if geometry["mandatory_pass"]:
+                pending_push["recovery_iterations"] = iteration-pending_push["iteration"]-1
+                pending_push["recovered_at_iteration"] = iteration
+                pending_push = None
         status = acceptance(geometry, metrics, profile_tolerance, composition_tolerance)
         last_report = {"geometry": geometry, "metrics": metrics, "status": status,
                        "iterations": iteration, "elapsed_seconds": time.monotonic()-started}
         if geometry["mandatory_pass"]:
+            feasible_iterations.append(iteration)
             if first_feasible is None:
                 first_feasible = iteration
                 if stage_progress and refine_iterations and status != "valid":
@@ -313,6 +331,15 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                    sum(abs(m["count_difference"]) for m in metrics["elements"].values()))
             if key < best_key:
                 best, best_key = (candidate, last_report.copy()), key
+                worst = max(metrics["elements"], key=lambda e: metrics["elements"][e]["profile_error"] or 0)
+                best_history.append({"iteration": iteration, "ranking_key": list(key),
+                    "total_profile_error": metrics["total_profile_error"], "max_element_error": max(errors),
+                    "mean_element_error": float(np.mean(errors)), "count_difference": key[3],
+                    "worst_element": worst,
+                    "element_errors": {e: m["profile_error"] for e, m in metrics["elements"].items()}})
+                if stage_progress:
+                    stage_progress(f"New best feasible candidate at iteration {iteration}: "
+                                   f"total={metrics['total_profile_error']:.6f}, max element={max(errors):.6f} ({worst})")
         reason = None
         if status == "valid" or (geometry["mandatory_pass"] and refine_iterations == 0):
             reason = "constraints_satisfied"
@@ -323,7 +350,11 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         elif iteration == max_iterations:
             reason = "iteration_limit"
         if progress and (iteration % progress_interval == 0 or reason is not None):
-            progress(iteration, geometry, metrics)
+            displayed = dict(geometry)
+            if reason is not None and not geometry["mandatory_pass"]:
+                displayed["final_search_state"] = True
+                displayed["export_candidate_available"] = best is not None
+            progress(iteration, displayed, metrics)
         if reason is not None:
             termination = reason
             break
@@ -355,10 +386,20 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         force += (clipped-radial)[:, None]*direction*0.8
         # Soft radial transport; rank by current radius for each element.
         if geometry["mandatory_pass"]:
+            requested_moves = []
             for e, target_radial in quantiles.items():
                 indices = metadata.element_indices[e]
                 order = indices[np.argsort(radial[indices], kind="stable")]
-                force[order] += 0.015*(target_radial-radial[order])[:, None]*direction[order]
+                requested = 0.015*(target_radial-radial[order])
+                force[order] += requested[:, None]*direction[order]
+                requested_moves.append(np.abs(requested))
+            requested_moves = np.concatenate(requested_moves)
+            pending_push = {"iteration": iteration, "strength": 0.015, "selected_atoms": len(radial),
+                            "atoms_pushed": int(np.count_nonzero(requested_moves)),
+                            "mean_requested_radial_move_angstrom": float(np.mean(requested_moves)),
+                            "max_requested_radial_move_angstrom": float(np.max(requested_moves)),
+                            "recovery_iterations": None}
+            push_history.append(pending_push)
             profile_updates += 1
         force += (center-structure.xyz.mean(axis=0))*0.1
         if geometry["mandatory_pass"]:
@@ -378,6 +419,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     report["first_feasible_iteration"] = first_feasible
     report["refinement_steps"] = iteration-first_feasible if first_feasible is not None else 0
     report["profile_updates"] = profile_updates
+    report.update({"feasible_iterations": feasible_iterations, "push_history": push_history,
+                   "best_history": best_history, "initial_metrics": initial_metrics})
     report["profile_error_objective"] = "worst_element_then_mean"
     report["initial_transforms"] = rotations
     return output, report
