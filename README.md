@@ -55,6 +55,25 @@ requirements, package metadata, and the CLI entry point. Python normally compile
 bytecode automatically, so `compileall` is optional. Start a new mastercap process
 after updating to load the new code.
 
+## Command-line help
+
+`mastercap -h` (or `mastercap --help`) prints the complete reference for all three
+commands: every option, its meaning, concrete or inferred/unset defaults, accepted
+choices, units, examples, output files, acceptance rules and exit codes.
+
+For a shorter reference limited to one command, use:
+
+```bash
+mastercap analyze -h
+mastercap generate -h
+mastercap validate -h
+mastercap --version
+```
+
+Help does not read coordinate files or download data. Quality tolerances remain
+unset until explicitly supplied; the examples use `--allow-approximate` when
+saving mandatory-feasible, uncalibrated particles.
+
 ## Workflows
 
 All distances are in angstroms and densities in atoms/angstrom³. All interfaces
