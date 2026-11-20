@@ -94,7 +94,9 @@ def test_validation_plot_honors_no_smoothing_in_legacy_report(tmp_path, small_pd
     report = json.loads(report_path.read_text())
     report["mastercap_version"] = "0.1.2"
     report["analysis"].pop("smoothing")
-    for field in ("progress_interval", "refine_iterations", "no_check_certificate"):
+    for field in ("progress_interval", "refine_iterations", "no_check_certificate", "selection_objective",
+                  "refine_updates", "refine_patience", "refine_strength", "refine_max_step",
+                  "refine_fraction", "refine_recovery_limit"):
         report["configuration"].pop(field)
     report_path.write_text(json.dumps(report))
     settings = []
@@ -156,9 +158,10 @@ def test_stratified_quantiles_preserve_sparse_target_bins():
 
 def test_uncalibrated_refinement_improves_element_profile_and_keeps_geometry():
     elements = ["C", "C", "S", "S", "N"]
+    # Different axes permit radial improvement without atoms crossing each other.
     source = Structure([Atom(e, e, "ALA", i) for i, e in enumerate(elements)],
-                       np.array([[-3.0, 0, 0], [3, 0, 0], [-1, 0, 0], [1, 0, 0], [0, 0, 0]]))
-    edges = np.array([0.0, 0.1, 2.0, 4.0])
+                       np.array([[-2.8, 0, 0], [2.8, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, 0]]))
+    edges = np.array([0.0, 0.1, 2.0, 3.0])
     volume = shell_volumes(edges)
     profiles = {"C": np.array([0.0, 2, 0])/volume, "S": np.array([0.0, 0, 2])/volume,
                 "N": np.array([1.0, 0, 0])/volume}
@@ -169,11 +172,13 @@ def test_uncalibrated_refinement_improves_element_profile_and_keeps_geometry():
         _, initial = search(source.copy(), analysis, edges, profiles, np.zeros(3), np.random.default_rng(42),
                             refine_iterations=0)
         result, refined = search(source.copy(), analysis, edges, profiles, np.zeros(3), np.random.default_rng(42),
-                                  refine_iterations=100)
+                                  refine_updates=150, refine_patience=0, selection_objective="worst-element")
     assert result is not None
     assert refined["geometry"]["mandatory_pass"]
     assert refined["status"] == "uncalibrated"
     assert refined["profile_updates"] > 0
+    assert refined["profile_error_objective"] == "worst-element"
+    assert all("S" in item["element_errors"] for item in refined["best_history"])
     assert refined["metrics"]["elements"]["S"]["profile_error"] < initial["metrics"]["elements"]["S"]["profile_error"]
 
 

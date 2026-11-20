@@ -36,6 +36,10 @@ def main():
     parser.add_argument("--iterations", type=int, default=30)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--refine-updates", type=int, default=50)
+    parser.add_argument("--refine-iterations", type=int, default=None)
+    parser.add_argument("--refine-patience", type=int, default=10)
+    parser.add_argument("--selection-objective", choices=("total", "worst-element"), default="total")
     args = parser.parse_args()
     if args.residues < 3 or args.iterations < 0 or args.repeats < 1 or args.seed < 0:
         parser.error("require residues >= 3, iterations >= 0, repeats >= 1 and seed >= 0")
@@ -47,9 +51,15 @@ def main():
         rng = np.random.default_rng(args.seed)
         inventory, _ = select_inventory(analysis, edges, profiles, rng)
         _, details = search(inventory, analysis, edges, profiles, analysis.center, rng,
-                            max_iterations=args.iterations, time_limit=300)
+                            max_iterations=args.iterations, time_limit=300,
+                            refine_updates=args.refine_updates, refine_iterations=args.refine_iterations,
+                            refine_patience=args.refine_patience, selection_objective=args.selection_objective)
         runs.append({k: details.get(k) for k in
-                     ("iterations", "preparation_seconds", "elapsed_seconds", "termination", "geometry")})
+                     ("iterations", "preparation_seconds", "elapsed_seconds", "termination", "geometry",
+                      "candidate_iteration", "profile_updates", "rollback_count", "median_recovery_iterations",
+                      "feasible_iterations", "push_history", "best_history", "initial_metrics", "metrics",
+                      "refinement_stop_limit", "profile_error_objective", "refinement_settings",
+                      "refinement_updates", "last_search_geometry")})
     # Before 0.1.1 elapsed_seconds already included initialization; the fallback
     # allows the same probe to compare that revision without subtracting work.
     elapsed = [run["elapsed_seconds"]+(run["preparation_seconds"] or 0.0) for run in runs]

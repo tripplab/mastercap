@@ -10,6 +10,7 @@ from scipy.spatial.transform import Rotation
 from .model import Structure, MastercapError
 from .analysis import shell_volumes
 from .constraints import GeometryMetadata, local_geometry, validate_geometry, profile_metrics, acceptance
+from .refinement import PushController, apply_radial_push, candidate_key, error_summary
 
 
 def residue_groups(structure):
@@ -264,10 +265,21 @@ def characteristic_forces(force, structure, analysis, metadata):
 def search(structure, analysis, edges, profiles, center, rng, mode="independent",
            distribution="random", max_iterations=1000, time_limit=300.0, margin=0.0,
            profile_tolerance=None, composition_tolerance=None, progress=None,
-           progress_interval=5, refine_iterations=100, stage_progress=None):
+           progress_interval=5, refine_iterations=None, stage_progress=None,
+           selection_objective="total", refine_updates=50, refine_patience=10,
+           refine_strength=0.005, refine_max_step=0.05, refine_fraction=0.2,
+           refine_recovery_limit=10):
     preparation_started = time.monotonic()
-    if max_iterations < 0 or time_limit <= 0 or margin < 0 or refine_iterations < 0 or progress_interval < 1:
-        raise MastercapError("Iterations, refinement steps and overlap margin must be nonnegative; time/progress interval positive")
+    if (max_iterations < 0 or time_limit <= 0 or margin < 0 or progress_interval < 1
+            or (refine_iterations is not None and refine_iterations < 0)
+            or refine_updates < 0 or refine_patience < 0 or refine_recovery_limit < 0):
+        raise MastercapError("Iteration/update/patience/recovery limits and margin must be nonnegative; time/progress interval positive")
+    if (not np.isfinite([refine_strength, refine_max_step, refine_fraction]).all()
+            or refine_strength <= 0 or refine_strength > np.finfo(float).max/4
+            or refine_max_step <= 0 or not 0 < refine_fraction <= 1):
+        raise MastercapError("Refinement strength/max step must be finite and positive; fraction must be in (0, 1]")
+    if selection_objective not in ("total", "worst-element"):
+        raise MastercapError("Selection objective must be total or worst-element")
     if stage_progress:
         stage_progress("Building inventory metadata and initializing particle coordinates")
     metadata = GeometryMetadata.build(structure, analysis.limits)
@@ -286,7 +298,11 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     profile_updates = 0
     feasible_iterations, push_history, best_history = [], [], []
     initial_metrics = None
-    pending_push = None
+    controller = PushController(refine_strength, refine_recovery_limit, len(structure.atoms), push_history)
+    last_significant_key = None
+    last_improvement_update = 0
+    improvement_relative = 0.001
+    stop_limit = None
     last_report = None
     preparation_seconds = time.monotonic()-preparation_started
     # The repair budget starts only after inventory-dependent initialization.
@@ -304,18 +320,11 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         metrics = profile_metrics(candidate, center, edges, profiles, analysis.original, metadata=metadata)
         if initial_metrics is None:
             initial_metrics = {"total_profile_error": metrics["total_profile_error"], "elements": metrics["elements"]}
-        if pending_push is not None:
-            if "damage" not in pending_push:
-                pending_push["damage"] = {"iteration": iteration,
-                    "distance_violations": geometry["distance_violations"],
-                    "global_components": geometry["global_components"],
-                    "disconnected_residues": len(geometry["disconnected_residues"]),
-                    "outside_radial_bounds": geometry["outside_radial_bounds"],
-                    "mandatory_pass": geometry["mandatory_pass"]}
-            if geometry["mandatory_pass"]:
-                pending_push["recovery_iterations"] = iteration-pending_push["iteration"]-1
-                pending_push["recovered_at_iteration"] = iteration
-                pending_push = None
+        rolled_back = controller.observe(iteration, geometry, structure.xyz)
+        if rolled_back and stage_progress:
+            record = push_history[-1]
+            stage_progress(f"Rollback push from iteration {record['iteration']} at iteration {iteration}: "
+                           f"{record['rollback_reason']}; next radial strength={controller.strength:.6g}; snapshot restored")
         status = acceptance(geometry, metrics, profile_tolerance, composition_tolerance)
         last_report = {"geometry": geometry, "metrics": metrics, "status": status,
                        "iterations": iteration, "elapsed_seconds": time.monotonic()-started}
@@ -323,28 +332,36 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             feasible_iterations.append(iteration)
             if first_feasible is None:
                 first_feasible = iteration
-                if stage_progress and refine_iterations and status != "valid":
+                if stage_progress and refine_updates and refine_iterations != 0 and status != "valid":
                     stage_progress(f"Geometry feasible at iteration {iteration}; refining per-element profiles "
-                                   f"for up to {refine_iterations} additional steps within remaining search limits")
-            errors = [m["profile_error"] or 0.0 for m in metrics["elements"].values()]
-            key = (max(errors), float(np.mean(errors)), metrics["total_profile_error"],
-                   sum(abs(m["count_difference"]) for m in metrics["elements"].values()))
+                                   f"for up to {refine_updates} pushes within remaining search limits")
+            key = candidate_key(metrics, selection_objective)
             if key < best_key:
                 best, best_key = (candidate, last_report.copy()), key
-                worst = max(metrics["elements"], key=lambda e: metrics["elements"][e]["profile_error"] or 0)
-                best_history.append({"iteration": iteration, "ranking_key": list(key),
-                    "total_profile_error": metrics["total_profile_error"], "max_element_error": max(errors),
-                    "mean_element_error": float(np.mean(errors)), "count_difference": key[3],
-                    "worst_element": worst,
-                    "element_errors": {e: m["profile_error"] for e, m in metrics["elements"].items()}})
+                summary = error_summary(metrics)
+                best_history.append({"iteration": iteration, "ranking_key": list(key), **summary})
+                if (last_significant_key is None or
+                        last_significant_key[0]-key[0] > max(1e-12, abs(last_significant_key[0])*improvement_relative)):
+                    last_significant_key = key
+                    last_improvement_update = profile_updates
                 if stage_progress:
                     stage_progress(f"New best feasible candidate at iteration {iteration}: "
-                                   f"total={metrics['total_profile_error']:.6f}, max element={max(errors):.6f} ({worst})")
+                                   f"total={summary['total_profile_error']:.6f}, "
+                                   f"max element={summary['max_element_error']:.6f} ({summary['worst_element']}); "
+                                   f"objective={selection_objective}")
         reason = None
-        if status == "valid" or (geometry["mandatory_pass"] and refine_iterations == 0):
+        if status == "valid" or (geometry["mandatory_pass"] and (refine_iterations == 0 or refine_updates == 0)):
             reason = "constraints_satisfied"
-        elif first_feasible is not None and iteration-first_feasible >= refine_iterations:
+        elif first_feasible is not None and profile_updates >= refine_updates:
             reason = "refinement_complete"
+            stop_limit = "refine_updates"
+        elif first_feasible is not None and refine_iterations is not None and iteration-first_feasible >= refine_iterations:
+            reason = "refinement_complete"
+            stop_limit = "refine_iterations"
+        elif controller.stalled or (first_feasible is not None and refine_patience > 0
+                                    and profile_updates-last_improvement_update >= refine_patience):
+            reason = "refinement_stalled"
+            stop_limit = "strength_floor" if controller.stalled else "refine_patience"
         elif time.monotonic()-started >= time_limit:
             reason = "time_limit"
         elif iteration == max_iterations:
@@ -358,6 +375,11 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         if reason is not None:
             termination = reason
             break
+        if rolled_back:
+            # All graphs describe the evaluated, damaged coordinates. The next
+            # iteration checks the restored snapshot; never use stale graphs.
+            del local
+            continue
         force = np.zeros_like(structure.xyz)
         repair = local["distances"] < local["lower"]+0.003
         if mode == "residue":
@@ -386,26 +408,17 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         force += (clipped-radial)[:, None]*direction*0.8
         # Soft radial transport; rank by current radius for each element.
         if geometry["mandatory_pass"]:
-            requested_moves = []
-            for e, target_radial in quantiles.items():
-                indices = metadata.element_indices[e]
-                order = indices[np.argsort(radial[indices], kind="stable")]
-                requested = 0.015*(target_radial-radial[order])
-                force[order] += requested[:, None]*direction[order]
-                requested_moves.append(np.abs(requested))
-            requested_moves = np.concatenate(requested_moves)
-            pending_push = {"iteration": iteration, "strength": 0.015, "selected_atoms": len(radial),
-                            "atoms_pushed": int(np.count_nonzero(requested_moves)),
-                            "mean_requested_radial_move_angstrom": float(np.mean(requested_moves)),
-                            "max_requested_radial_move_angstrom": float(np.max(requested_moves)),
-                            "recovery_iterations": None}
-            push_history.append(pending_push)
+            details = apply_radial_push(force, radial, direction, metadata.element_indices, quantiles,
+                                        controller.strength, refine_max_step, refine_fraction)
+            controller.start(iteration, structure.xyz, details)
             profile_updates += 1
         force += (center-structure.xyz.mean(axis=0))*0.1
         if geometry["mandatory_pass"]:
             characteristic_forces(force, structure, analysis, metadata)
         update_positions(structure, force, groups, mode)
         del local, force
+    controller.finish()
+    last_search_geometry = last_report["geometry"]
     if best is not None:
         output, report = best
         report["candidate_iteration"] = report["iterations"]
@@ -419,9 +432,21 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     report["first_feasible_iteration"] = first_feasible
     report["refinement_steps"] = iteration-first_feasible if first_feasible is not None else 0
     report["profile_updates"] = profile_updates
+    report["refinement_updates"] = profile_updates
+    completed_recoveries = [p["recovery_iterations"] for p in push_history if p["recovery_iterations"] is not None]
+    report["median_recovery_iterations"] = float(np.median(completed_recoveries)) if completed_recoveries else None
     report.update({"feasible_iterations": feasible_iterations, "push_history": push_history,
                    "best_history": best_history, "initial_metrics": initial_metrics})
-    report["profile_error_objective"] = "worst_element_then_mean"
+    report["profile_error_objective"] = selection_objective
+    report.update({"rollback_count": controller.rollbacks, "refinement_strength_final": controller.strength,
+                   "refinement_stop_limit": stop_limit, "last_search_geometry": last_search_geometry,
+                   "last_significant_improvement_update": last_improvement_update,
+                   "refinement_settings": {"updates": refine_updates, "iteration_cap": refine_iterations,
+                       "patience": refine_patience, "improvement_relative": improvement_relative,
+                       "starting_strength": refine_strength, "minimum_strength": controller.minimum,
+                       "maximum_strength": controller.maximum, "fraction": refine_fraction,
+                       "max_step_angstrom": refine_max_step, "recovery_limit": refine_recovery_limit,
+                       "big_damage_distance_fraction": 0.0005, "big_damage_component_limit": 50}})
     report["initial_transforms"] = rotations
     return output, report
 

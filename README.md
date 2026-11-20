@@ -188,7 +188,7 @@ residue, distance and connectivity constraints.
 mastercap generate --input ./1cwp_full.vdb --output-prefix results/particle03 \
   --mode independent --distribution regular --bin-width 4 --no-smoothing \
   --time-limit 600 --seed 42 --allow-approximate --csv --plot \
-  --progress-interval 5 --refine-iterations 100
+  --progress-interval 5 --refine-updates 50 --selection-objective total
 ```
 
 Either radius may be overridden. Profiles map by relative position through the
@@ -223,17 +223,54 @@ Rigid updates use Kabsch projection. Mandatory
 repairs precede soft profile improvement. The search is heuristic, not a physical
 simulation, and does not guarantee convergence or final angular isotropy.
 
-After first feasible geometry, search now attempts up to `--refine-iterations`
-additional steps (default **100**), including any repairs needed after profile
-moves. This fixes first-feasible stopping that previously skipped element-profile
-refinement when tolerances were unset. Set it to **0** for the earlier behavior.
-Refinement shares the same time and maximum-iteration limits, can stop earlier
-when supplied quality tolerances pass, and always retains the best feasible
-candidate. Ranking first minimizes the worst relative element error, then the
-mean element error, then aggregate error, so rare elements are not judged only
-by their contribution to total density. Deterministic, volume-aware radial
-quantiles avoid adding fresh sampling noise to refinement targets. Constraints
-can still prevent improvement; full-capsid quality requires measurement.
+### Adaptive profile refinement
+
+After first feasible geometry, the main refinement budget counts **profile
+pushes**, not the repair iterations between them. Rolled-back pushes count too.
+`--time-limit` and `--max-iterations` remain hard, cooperative search limits.
+Setting either `--refine-updates 0` or `--refine-iterations 0` stops at the first
+feasible geometry. The best feasible candidate is kept separately and final PDB
+validation remains independent.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--selection-objective` | `total` | Rank feasible candidates by atom-weighted total error first; `worst-element` restores the previous ranking. |
+| `--refine-updates` | 50 | Maximum pushes, including attempts subsequently rolled back. |
+| `--refine-iterations` | unset | Optional cap on all iterations since first feasible geometry, including repair and rollback; off by default. |
+| `--refine-patience` | 10 | Pushes without significant improvement before stopping; 0 disables this check. |
+| `--refine-strength` | 0.005 | Starting radial-push strength; adapts during search. |
+| `--refine-max-step` | 0.05 A | Cap on the requested radial profile contribution per selected atom. |
+| `--refine-fraction` | 0.2 | Fraction per element to push, rounding up; prioritize largest radial mismatches. |
+| `--refine-recovery-limit` | 10 | Repair updates allowed after damage; 0 restores immediately if the next state is invalid. |
+
+All atoms of each element are radially ranked against deterministic,
+volume-aware quantiles; only the selected fraction receives radial contributions.
+The requested radial move is `clip(strength * radial_error, -max_step, max_step)`.
+Geometry-repair forces are still computed first on the same update. Nearest-neighbor
+`characteristic_forces` is unchanged (coefficient 0.002): it shares the feasible
+push update and the overall 0.2 A position-update cap, but is not scaled by the
+radial strength or limited by the radial-only 0.05 A cap. Rigid projection can
+also redistribute moves. Damage histories measure the resulting combined update.
+
+One full coordinate snapshot is saved before each push, including in rigid-residue
+mode. If the next checked state stays feasible, strength increases by 1.25, capped
+at four times its starting value. Small damage keeps the strength and allows
+repair. A distance-violating pair count greater than 0.0005 times the atom count,
+or at least 50 components, triggers rollback. Failure to recover within the recovery allowance
+also restores the snapshot. Rollback restores only coordinates, halves strength,
+and leaves iteration counts, history and the best candidate intact. Falling below
+1/16 of starting strength stops with `refinement_stalled`; no push uses that
+below-floor strength. This is a controller stop, not proof of infeasibility.
+
+`total` ranks total error, then mean element error, then maximum element error,
+then count difference. `worst-element` ranks maximum, mean, total, then count
+difference. Both preserve per-element measurements, including S. A significant
+improvement resets patience when the primary ranking error decreases by more than
+0.1% relative to its last significant improvement (absolute floor 1e-12).
+Smaller improvements can still replace the best candidate without resetting
+patience. Sparse elements and coarse bins produce plateaus; increase patience or
+set it to 0 when investigating those cases. Quality tolerances can stop search
+earlier, and no setting guarantees exact profile matching.
 
 Every exported particle must satisfy after PDB rounding and rereading:
 
@@ -271,9 +308,12 @@ with its subphases. `search.elapsed_seconds` measures only the reported attempt'
 repair search; `search.preparation_seconds` measures its initialization/metadata
 setup. `timings_seconds.search` includes both attempts when fallback occurs.
 `search.termination` is `time_limit`, `iteration_limit`, `constraints_satisfied`,
-or `refinement_complete`. The latter means the refinement-step allowance was
-used, not that scientifically calibrated quality criteria passed.
-`iterations` counts completed repair updates; `candidate_iteration` identifies
+`refinement_complete`, or `refinement_stalled`. Completion means a push/optional
+iteration budget was used, not that scientifically calibrated criteria passed;
+`refinement_stop_limit` identifies the budget or stall condition. Checks prioritize
+supplied quality acceptance/first-feasible stopping, refinement budgets, stalling,
+time limit, then iteration limit. `iterations` is the last evaluated search
+iteration, including rollback-only iterations; `candidate_iteration` identifies
 the selected feasible candidate, which can precede termination. Search may end
 at a limit while still returning a previously feasible approximate candidate.
 v1 does not resume interrupted runs. Search failure is not proof of mathematical
@@ -303,6 +343,24 @@ Search metadata also records the first feasible iteration, refinement steps,
 actual profile updates and the selected candidate's iteration. Candidate geometry
 and metrics describe the selected feasible output, which may precede the final
 search iteration.
+
+`feasible_iterations` lists every feasible check. `best_history` records each
+replacement, the four ranking components and every element error. New-best INFO
+messages are independent of `--progress-interval`. `initial_metrics` stores the
+iteration-0 total and per-element metrics. `push_history` records push iteration,
+strength, selected/nonzero-pushed counts, mean/max absolute requested radial move,
+the next evaluated state's damage, recovery, strength changes and rollbacks.
+`recovery_iterations` excludes the push itself: 0 means the next state was already
+feasible. Rolled-back/unrecovered pushes have no completed recovery value and are
+excluded from `median_recovery_iterations`. Snapshot arrays are never serialized.
+
+`refinement_updates` equals `profile_updates` and `len(push_history)`;
+`refinement_steps` still counts iterations since first feasible geometry. Final
+logs summarize feasible checks, pushes, rollbacks and median recovery. A broken
+final progress sample is explicitly marked as not the exported candidate;
+`last_search_geometry` describes that last evaluated state, while `geometry`
+describes the selected candidate. A rollback may restore coordinates after that
+evaluation without reusing its stale geometry graph.
 
 The primary per-element profile error is:
 `sum(abs(generated_density - target_density) * shell_volume) / target_count`.
@@ -373,3 +431,14 @@ python benchmarks/search_shell.py --residues 600 --iterations 30 --repeats 3
 
 It reports timings and remaining violations on a carbon-only shell. This measures
 iteration cost and is not a demonstration of full-capsid convergence.
+
+To exercise the adaptive controller and collect push/damage/recovery histories:
+
+```bash
+python benchmarks/search_shell.py --residues 60 --iterations 400 --repeats 3 \
+  --refine-updates 50 --selection-objective total
+```
+
+Compare push counts, completed recovery lengths, rollbacks, initial/final errors
+and termination reasons. Different stopping budgets imply different amounts of
+work; timings alone are not an equal-work speed comparison or 1CWP validation.

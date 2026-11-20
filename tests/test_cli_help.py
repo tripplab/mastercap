@@ -89,7 +89,7 @@ def test_help_displays_changed_parser_defaults_instead_of_static_copies():
 
 def test_version_matches_project_metadata_and_cli(capsys):
     metadata = tomllib.loads((Path(__file__).resolve().parents[1]/"pyproject.toml").read_text())
-    assert __version__ == metadata["project"]["version"] == "0.1.3"
+    assert __version__ == metadata["project"]["version"] == "0.1.4"
     with pytest.raises(SystemExit) as stopped:
         main(["--version"])
     assert stopped.value.code == 0
