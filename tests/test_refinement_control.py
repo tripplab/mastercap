@@ -105,6 +105,11 @@ def test_cli_neighbor_modes_reach_search_and_export_valid_pdb(tmp_path, small_pd
     report = json.loads(prefix.with_suffix(".json").read_text())
     assert report["geometry"]["mandatory_pass"]
     assert report["search"]["refinement_settings"]["neighbor_forces"] == mode
+    gap_keys = ("distance_gap_min_angstrom", "contact_gap_min_angstrom")
+    before = report["search"]["slack_at_first_feasible"]
+    after = report["search"]["slack_after_consolidation"]
+    assert min(after[key] for key in gap_keys) > min(before[key] for key in gap_keys)
+    assert min(after[key] for key in gap_keys) >= 0.01
     pushes = report["search"]["push_history"]
     assert len(pushes) == 1
     neighbor = pushes[0]["neighbor_forces"]

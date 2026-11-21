@@ -309,6 +309,18 @@ consolidation and per-atom acceptance. It requires the complete 214,440-protein-
 reference. Uncalibrated successful generation returns exit code 2. Benchmark
 measurements and the reference checksum are retained in `benchmarks/1cwp_refinement.json`.
 
+On the complete 1CWP reference (seed 42, regular initialization, 4 A bins,
+no smoothing, 600 s budget), version 0.1.5 reached total error **0.060828**
+with **57.6%** mean proposal acceptance and **zero rollbacks** in **399.7 s**.
+All refinement states after consolidation were feasible. Search stopped after
+32 pushes on patience: `termination=refinement_stalled` with
+`refinement_stop_limit=refine_patience`, preserving the existing termination
+mapping; it did not hit the strength floor. The independently reread PDB passed
+mandatory checks. Consolidation exhausted its three restarts, so its target
+slack was only partially achieved. Sulfur error remained 0.837; total-error
+selection does not guarantee improvement for each element. These measurements
+are a reproducible benchmark, not calibrated scientific acceptance tolerances.
+
 With `--refine-acceptance rollback`, a full coordinate snapshot is saved before
 each push, including rigid residues. Damage below the configured disaster limits
 gets up to `--refine-recovery-limit` repair updates. Recovery is compared against
@@ -434,7 +446,7 @@ atom move, or an improved recovery in rollback mode; zero-move attempts still
 consume the push budget. In push records, `atoms_proposed = atoms_accepted + atoms_undone`
 counts proposals; `proposed_moving_atoms`, `atoms_moved` and `stationary_proposals`
 distinguish physical motion from proposals below PDB rounding resolution.
-The console says `0 attempted` when no repair was needed.
+The console says `0 attempted` when no post-push repair was attempted.
 
 `refinement_updates` equals `profile_updates` and `len(push_history)`;
 `refinement_steps` still counts iterations since first feasible geometry. Final

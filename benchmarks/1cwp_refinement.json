@@ -1,0 +1,369 @@
+{
+  "reference": {
+    "filename": "1cwp_full.vdb.gz",
+    "sha256": "60cb40bf0490f0243c1f7339d7e13c234a0ec27804196a9affebd4b48400d1a7",
+    "protein_atoms": 214440
+  },
+  "parameters": {
+    "seed": 42,
+    "mode": "independent",
+    "distribution": "regular",
+    "bin_width": 4,
+    "smoothing": false,
+    "time_limit": 600
+  },
+  "baselines": {
+    "particle03": {
+      "total_error": 0.0609,
+      "sulfur_error": 0.826,
+      "search_seconds": 473
+    },
+    "particle05": {
+      "total_error": 0.0626,
+      "sulfur_error": 0.837,
+      "iterations": 85,
+      "rollbacks": 5
+    }
+  },
+  "runs": {
+    "step1_off": {
+      "termination": "refinement_stalled",
+      "iterations": 128,
+      "elapsed_seconds": 293.97469116999855,
+      "profile_updates": 14,
+      "rollback_count": 5,
+      "refinement_stop_limit": "strength_floor",
+      "candidate_iteration": 122,
+      "first_feasible_iteration": 76,
+      "total_error": 0.06247901510912143,
+      "element_errors": {
+        "C": 0.038847556528081695,
+        "N": 0.12449451184286539,
+        "O": 0.0784732100521574,
+        "S": 0.837037037037037
+      },
+      "first_pushes": [
+        {
+          "iteration": 76,
+          "strength": 0.005,
+          "damage": {
+            "iteration": 77,
+            "distance_violations": 1424,
+            "global_components": 241,
+            "disconnected_residues": 20,
+            "outside_radial_bounds": 0,
+            "isolated_atoms": 2,
+            "center_error_angstrom": 7.781301169661488e-06,
+            "mandatory_pass": false
+          },
+          "rollback": true
+        },
+        {
+          "iteration": 78,
+          "strength": 0.0025,
+          "damage": {
+            "iteration": 79,
+            "distance_violations": 248,
+            "global_components": 176,
+            "disconnected_residues": 12,
+            "outside_radial_bounds": 0,
+            "isolated_atoms": 0,
+            "center_error_angstrom": 9.294560112154385e-06,
+            "mandatory_pass": false
+          },
+          "rollback": true
+        },
+        {
+          "iteration": 80,
+          "strength": 0.00125,
+          "damage": {
+            "iteration": 81,
+            "distance_violations": 63,
+            "global_components": 80,
+            "disconnected_residues": 8,
+            "outside_radial_bounds": 0,
+            "isolated_atoms": 0,
+            "center_error_angstrom": 9.935226950223567e-06,
+            "mandatory_pass": false
+          },
+          "rollback": true
+        },
+        {
+          "iteration": 82,
+          "strength": 0.000625,
+          "damage": {
+            "iteration": 83,
+            "distance_violations": 37,
+            "global_components": 27,
+            "disconnected_residues": 5,
+            "outside_radial_bounds": 0,
+            "isolated_atoms": 0,
+            "center_error_angstrom": 9.506815402075918e-06,
+            "mandatory_pass": false
+          },
+          "rollback": false
+        },
+        {
+          "iteration": 87,
+          "strength": 0.000625,
+          "damage": {
+            "iteration": 88,
+            "distance_violations": 34,
+            "global_components": 63,
+            "disconnected_residues": 3,
+            "outside_radial_bounds": 0,
+            "isolated_atoms": 0,
+            "center_error_angstrom": 6.097884421684372e-06,
+            "mandatory_pass": false
+          },
+          "rollback": true
+        }
+      ]
+    },
+    "step1_fixed": {
+      "termination": "refinement_stalled",
+      "iterations": 85,
+      "elapsed_seconds": 205.04645752600118,
+      "profile_updates": 5,
+      "rollback_count": 5,
+      "refinement_stop_limit": "strength_floor",
+      "candidate_iteration": 76,
+      "first_feasible_iteration": 76,
+      "total_error": 0.06261891438164521,
+      "first_pushes": [
+        {
+          "iteration": 76,
+          "strength": 0.005,
+          "damage": {
+            "iteration": 77,
+            "distance_violations": 12974,
+            "global_components": 1116,
+            "disconnected_residues": 152,
+            "outside_radial_bounds": 2,
+            "isolated_atoms": 21,
+            "center_error_angstrom": 8.296887648548347e-05,
+            "mandatory_pass": false
+          },
+          "rollback": true
+        },
+        {
+          "iteration": 78,
+          "strength": 0.0025,
+          "damage": {
+            "iteration": 79,
+            "distance_violations": 12774,
+            "global_components": 1124,
+            "disconnected_residues": 152,
+            "outside_radial_bounds": 2,
+            "isolated_atoms": 21,
+            "center_error_angstrom": 8.268334816472256e-05,
+            "mandatory_pass": false
+          },
+          "rollback": true
+        },
+        {
+          "iteration": 80,
+          "strength": 0.00125,
+          "damage": {
+            "iteration": 81,
+            "distance_violations": 12724,
+            "global_components": 1123,
+            "disconnected_residues": 151,
+            "outside_radial_bounds": 2,
+            "isolated_atoms": 21,
+            "center_error_angstrom": 8.333528939292682e-05,
+            "mandatory_pass": false
+          },
+          "rollback": true
+        },
+        {
+          "iteration": 82,
+          "strength": 0.000625,
+          "damage": {
+            "iteration": 83,
+            "distance_violations": 12720,
+            "global_components": 1126,
+            "disconnected_residues": 153,
+            "outside_radial_bounds": 2,
+            "isolated_atoms": 21,
+            "center_error_angstrom": 8.310187245420399e-05,
+            "mandatory_pass": false
+          },
+          "rollback": true
+        },
+        {
+          "iteration": 84,
+          "strength": 0.0003125,
+          "damage": {
+            "iteration": 85,
+            "distance_violations": 12735,
+            "global_components": 1131,
+            "disconnected_residues": 154,
+            "outside_radial_bounds": 2,
+            "isolated_atoms": 21,
+            "center_error_angstrom": 8.318092839351453e-05,
+            "mandatory_pass": false
+          },
+          "rollback": true
+        }
+      ]
+    },
+    "intermediate_motion_denominator": {
+      "termination": "refinement_stalled",
+      "iterations": 122,
+      "elapsed_seconds": 393.27080691599986,
+      "profile_updates": 27,
+      "rollback_count": 0,
+      "refinement_stop_limit": "strength_floor",
+      "candidate_iteration": 120,
+      "first_feasible_iteration": 76,
+      "mean_acceptance_fraction": 0.567472333600315,
+      "slack_at_first_feasible": {
+        "distance_gap_min_angstrom": 0.0017280872479092935,
+        "distance_gap_p05_angstrom": 0.01391266297252669,
+        "distance_within_0_005_angstrom": 27468,
+        "contact_gap_min_angstrom": 1.5384615226210485e-07,
+        "contact_gap_p05_angstrom": 0.07839681365122422,
+        "contact_within_0_005_angstrom": 5258
+      },
+      "slack_after_consolidation": {
+        "distance_gap_min_angstrom": 0.0020017792026152392,
+        "distance_gap_p05_angstrom": 0.01988326352633374,
+        "distance_within_0_005_angstrom": 262,
+        "contact_gap_min_angstrom": 4.615384949779866e-07,
+        "contact_gap_p05_angstrom": 0.07607138294720626,
+        "contact_within_0_005_angstrom": 252
+      },
+      "total_error": 0.06082820369334078,
+      "element_errors": {
+        "C": 0.03884755652808168,
+        "N": 0.12212593876372037,
+        "O": 0.07202465623518255,
+        "S": 0.837037037037037
+      },
+      "note": "Intermediate controller counted only physically moving atoms; failed the non-stall termination criterion. Corrected in 7aa94f4 to count selected proposals including stationary rounded proposals."
+    },
+    "final_selected_proposals": {
+      "termination": "refinement_stalled",
+      "iterations": 127,
+      "elapsed_seconds": 399.7174431650019,
+      "profile_updates": 32,
+      "rollback_count": 0,
+      "refinement_stop_limit": "refine_patience",
+      "candidate_iteration": 120,
+      "first_feasible_iteration": 76,
+      "mean_acceptance_fraction": 0.5758720387987315,
+      "committed_pushes": 32,
+      "slack_at_first_feasible": {
+        "distance_gap_min_angstrom": 0.0017280872479092935,
+        "distance_gap_p05_angstrom": 0.01391266297252669,
+        "distance_within_0_005_angstrom": 27468,
+        "contact_gap_min_angstrom": 1.5384615226210485e-07,
+        "contact_gap_p05_angstrom": 0.07839681365122422,
+        "contact_within_0_005_angstrom": 5258
+      },
+      "slack_after_consolidation": {
+        "distance_gap_min_angstrom": 0.0020017792026152392,
+        "distance_gap_p05_angstrom": 0.01988326352633374,
+        "distance_within_0_005_angstrom": 262,
+        "contact_gap_min_angstrom": 4.615384949779866e-07,
+        "contact_gap_p05_angstrom": 0.07607138294720626,
+        "contact_within_0_005_angstrom": 252
+      },
+      "consolidation_restarts": 3,
+      "consolidation_failures": 4,
+      "refinement_strength_final": 0.00036030006249999983,
+      "total_error": 0.06082820369334078,
+      "element_errors": {
+        "C": 0.03884755652808168,
+        "N": 0.12212593876372037,
+        "O": 0.07202465623518255,
+        "S": 0.837037037037037
+      },
+      "mandatory_pass": true,
+      "feasible_fraction_after_consolidation": 1.0,
+      "checks": {
+        "nearly_all_refinement_states_feasible": true,
+        "mean_acceptance_at_least_half": true,
+        "zero_rollbacks": true,
+        "budget_or_patience_stop": true,
+        "total_error_below_particle03": true,
+        "within_600_seconds": true,
+        "export_independent_validation": true
+      },
+      "all_checks_pass": true,
+      "notes": [
+        "Patience uses termination=refinement_stalled with refinement_stop_limit=refine_patience for backward compatibility; this is not a strength-floor stall.",
+        "Consolidation exhausted 3 restarts (4 interrupted attempts). All subsequent refinement states were feasible; target slack is best effort."
+      ],
+      "first_push_force_components": {
+        "repair": {
+          "mean_move_angstrom": 1.816840646379674e-08,
+          "max_move_angstrom": 0.0007673462590690508
+        },
+        "bridges": {
+          "mean_move_angstrom": 0.0,
+          "max_move_angstrom": 0.0
+        },
+        "radial_clip": {
+          "mean_move_angstrom": 1.1589067347920446e-09,
+          "max_move_angstrom": 1.783441373390815e-05
+        },
+        "centering": {
+          "mean_move_angstrom": 1.5656579793377357e-07,
+          "max_move_angstrom": 1.5656579793377355e-07
+        },
+        "radial_push": {
+          "mean_move_angstrom": 0.0008371458136939822,
+          "max_move_angstrom": 0.05000000000000001
+        },
+        "nearest_neighbor": {
+          "mean_move_angstrom": 0.003022270981926362,
+          "max_move_angstrom": 0.025000000000000012
+        }
+      },
+      "last_push_force_components": {
+        "repair": {
+          "mean_move_angstrom": 9.950942362320953e-08,
+          "max_move_angstrom": 0.0007049276501997049
+        },
+        "bridges": {
+          "mean_move_angstrom": 0.0,
+          "max_move_angstrom": 0.0
+        },
+        "radial_clip": {
+          "mean_move_angstrom": 3.178157967885244e-08,
+          "max_move_angstrom": 0.0004930406928338018
+        },
+        "centering": {
+          "mean_move_angstrom": 1.754647354170185e-05,
+          "max_move_angstrom": 1.7546473541701854e-05
+        },
+        "radial_push": {
+          "mean_move_angstrom": 5.5693444572237005e-05,
+          "max_move_angstrom": 0.005057787580027174
+        },
+        "nearest_neighbor": {
+          "mean_move_angstrom": 0.0002383437986587672,
+          "max_move_angstrom": 0.02500000000000001
+        }
+      },
+      "maximum_trial_check_passes": 3,
+      "whole_trial_safety_rejections": 0,
+      "center_rejections": 0,
+      "last_push_stationary_proposals": 11774,
+      "last_push_atoms_moved": 11546
+    }
+  },
+  "step1_commit": "df200e5",
+  "final_implementation_commit": "7aa94f4",
+  "mastercap_version": "0.1.5",
+  "date_utc": "2026-11-21",
+  "step1_diagnosis": "Fixed neighbor damage barely responds to radial strength (12974 to 12735 violating pairs), while off damage drops from 1424 to 63 after two halvings. Off still stalls; neighbor control alone is insufficient.",
+  "environment": {
+    "python": "3.12.14",
+    "numpy": "2.3.5",
+    "scipy": "1.17.0",
+    "platform": "Linux"
+  }
+}
