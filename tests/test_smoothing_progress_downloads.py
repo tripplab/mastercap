@@ -8,6 +8,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
+from mastercap import __version__
 from mastercap.analysis import analyze, shell_volumes, target_profiles
 from mastercap.cli import analysis_options, main, parser
 from mastercap.generate import profile_quantiles, search, select_inventory
@@ -136,6 +137,7 @@ def test_stage_messages_precede_warning_and_show_refinement(tmp_path, small_pdb,
                  "--no-smoothing", "--allow-approximate", "--progress-interval", "2", "--refine-iterations", "3",
                  "--consolidate-iterations", "0"]) == 2
     output = capsys.readouterr().err
+    assert output.splitlines()[0] == f"INFO: mastercap {__version__}"
     assert output.index("Reading reference coordinates") < output.index("WARNING: Reference analysis")
     for text in ("Estimating element-pair", "Selecting integer residue inventory", "Initializing", "refining per-element",
                  "Rereading written PDB", "Serializing JSON"):
