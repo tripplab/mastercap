@@ -168,7 +168,7 @@ def test_uncalibrated_refinement_improves_element_profile_and_keeps_geometry():
     limits = {(a, b): 0.2 for a in sorted(set(elements)) for b in sorted(set(elements)) if a <= b}
     analysis = SimpleNamespace(limits=limits, original=profiles)
     # Isolate radial refinement from random initialization and neighbor targets.
-    with patch("mastercap.generate.initialize", return_value=[]), patch("mastercap.generate.characteristic_forces"):
+    with patch("mastercap.generate.initialize", return_value=[]), patch("mastercap.generate.characteristic_forces", return_value={}):
         _, initial = search(source.copy(), analysis, edges, profiles, np.zeros(3), np.random.default_rng(42),
                             refine_iterations=0)
         result, refined = search(source.copy(), analysis, edges, profiles, np.zeros(3), np.random.default_rng(42),

@@ -31,11 +31,12 @@ def test_selection_objective_can_prefer_total_over_sulfur():
 def test_partial_push_prefers_largest_mismatch_and_caps_requested_moves():
     force = np.zeros((10, 3))
     direction = np.tile([1.0, 0, 0], (10, 1))
-    details = apply_radial_push(force, np.ones(10), direction,
+    details, selected = apply_radial_push(force, np.ones(10), direction,
                                 {"C": np.arange(8), "S": np.array([8, 9])},
                                 {"C": np.arange(8)+2, "S": np.array([3, 5])},
                                 strength=100, max_step=0.05, fraction=0.25)
     assert np.array_equal(np.flatnonzero(np.linalg.norm(force, axis=1)), [6, 7, 9])
+    assert np.array_equal(np.sort(selected), [6, 7, 9])
     assert details["selected_atoms"] == details["atoms_pushed"] == 3
     assert details["max_requested_radial_move_angstrom"] <= 0.05
     assert np.max(np.linalg.norm(force, axis=1)) <= 0.05
@@ -97,7 +98,7 @@ def controlled_case(lower=0.1, all_inner=False):
 
 
 def controlled_search(source, edges, profiles, analysis, **kwargs):
-    with patch("mastercap.generate.initialize", return_value=[]), patch("mastercap.generate.characteristic_forces"):
+    with patch("mastercap.generate.initialize", return_value=[]), patch("mastercap.generate.characteristic_forces", return_value={}):
         return search(source, analysis, edges, profiles, np.zeros(3), np.random.default_rng(42),
                        time_limit=30, max_iterations=500, **kwargs)
 

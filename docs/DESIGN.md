@@ -51,10 +51,17 @@ and controller live in `refinement.py`; noise-aware selection is not implemented
 Use deterministic volume-aware radial quantiles, rank all atoms, and push the
 largest-mismatch fraction per element (default 0.2). Radial strength starts at
 0.005 and requested radial moves are capped at 0.05 A. Repair forces are computed
-before profile contributions. Nearest-neighbor forces remain unchanged at 0.002;
-they share the feasible update and overall 0.2 A cap, not the radial-only cap or
-adaptive strength. Traces observe damage from the combined update. Rigid-body
-projection applies as before.
+before profile contributions. Nearest-neighbor contributions now run in that
+same feasible push block. The default `scaled` mode uses coefficient
+`0.002 * current_strength / starting_strength`, affects only radial-selected
+atoms, and caps each atom's accumulated neighbor vector at half the radial
+step cap. `off` disables this contribution; `fixed` uses coefficient 0.002,
+all atoms and no additional cap. Both active modes guard pair targets by
+0.003 A inside the lower-distance/contact window, skipping empty windows.
+The overall 0.2 A update cap and rigid projection still apply, so guarded
+targets alone do not guarantee feasibility of the combined update. Scalar
+neighbor move statistics are included with each push. The exact 1CWP off/fixed
+comparison must precede changes to consolidation and acceptance.
 
 One private full-coordinate snapshot supports rollback, including in rigid mode.
 Immediate feasibility grows strength by 1.25 up to 4x starting strength. Small

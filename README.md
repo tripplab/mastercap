@@ -242,15 +242,44 @@ validation remains independent.
 | `--refine-max-step` | 0.05 A | Cap on the requested radial profile contribution per selected atom. |
 | `--refine-fraction` | 0.2 | Fraction per element to push, rounding up; prioritize largest radial mismatches. |
 | `--refine-recovery-limit` | 10 | Repair updates allowed after damage; 0 restores immediately if the next state is invalid. |
+| `--neighbor-forces` | `scaled` | Nearest-neighbor contributions: `scaled` follows push controls, `off` disables them, `fixed` uses coefficient 0.002 on all atoms. |
 
 All atoms of each element are radially ranked against deterministic,
 volume-aware quantiles; only the selected fraction receives radial contributions.
 The requested radial move is `clip(strength * radial_error, -max_step, max_step)`.
-Geometry-repair forces are still computed first on the same update. Nearest-neighbor
-`characteristic_forces` is unchanged (coefficient 0.002): it shares the feasible
-push update and the overall 0.2 A position-update cap, but is not scaled by the
-radial strength or limited by the radial-only 0.05 A cap. Rigid projection can
-also redistribute moves. Damage histories measure the resulting combined update.
+Geometry-repair forces are still computed first on the same update. With
+`--neighbor-forces scaled`, nearest-neighbor contributions use coefficient
+`0.002 * (current_strength / starting_strength)` and affect only atoms selected
+by the radial push. Their accumulated vector per atom is capped at half
+`--refine-max-step`, independently of the radial contribution. `off` skips these
+contributions entirely; `fixed` keeps coefficient 0.002 and all-atom coverage
+without this additional cap. Both active modes clip pair targets between
+`lower + 0.003 A` and `sum_of_vdw_radii - overlap_margin - 0.003 A`, skipping
+empty windows. Thus `fixed` preserves the old coefficient and coverage but also
+includes the target safety fix. Target clipping alone does not guarantee that
+the combined coordinate update is feasible. The overall 0.2 A update cap and
+rigid projection still apply. Each push records scalar nearest-neighbor move
+statistics under `push_history[*].neighbor_forces`.
+
+To investigate the particle05 damage before changing consolidation or acceptance,
+repeat the same reference, seed and options with neighbors disabled, then fixed:
+
+```bash
+mastercap generate --input ./1cwp_full.vdb --output-prefix results/step1-off \
+  --mode independent --distribution regular --bin-width 4 --no-smoothing \
+  --time-limit 600 --seed 42 --allow-approximate --csv --plot --overwrite \
+  --neighbor-forces off
+mastercap generate --input ./1cwp_full.vdb --output-prefix results/step1-fixed \
+  --mode independent --distribution regular --bin-width 4 --no-smoothing \
+  --time-limit 600 --seed 42 --allow-approximate --csv --plot --overwrite \
+  --neighbor-forces fixed
+```
+
+Compare `search.push_history[*].damage` in the two JSON reports. These comparisons
+require the complete 214,440-protein-atom reference; the toy examples do not
+establish the cause of damage in that capsid. Uncalibrated successful generation
+returns exit code 2, so run the commands separately rather than chaining with
+`&&`.
 
 One full coordinate snapshot is saved before each push, including in rigid-residue
 mode. If the next checked state stays feasible, strength increases by 1.25, capped

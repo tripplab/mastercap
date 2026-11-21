@@ -31,9 +31,10 @@ def apply_radial_push(force, radial, direction, element_indices, targets,
 
     These are radial contributions BEFORE rigid projection, other forces, and
     the overall update_positions cap. The adaptive controller observes the
-    resulting combined move, not just this contribution.
+    resulting combined move, not just this contribution. Return scalar move
+    statistics and selected indices; indices remain private to the search.
     """
-    sizes, moves = [], []
+    sizes, moves, selected = [], [], []
     for element, target in targets.items():
         indices = element_indices[element]
         if not len(indices):
@@ -44,14 +45,16 @@ def apply_radial_push(force, radial, direction, element_indices, targets,
         chosen = np.argsort(-np.abs(delta), kind="stable")[:count]
         requested = np.clip(strength*delta[chosen], -max_step, max_step)
         force[order[chosen]] += requested[:, None]*direction[order[chosen]]
+        selected.append(order[chosen])
         sizes.append(count)
         moves.append(np.abs(requested))
     absolute = np.concatenate(moves) if moves else np.array([])
-    return {"strength": float(strength), "selected_atoms": sum(sizes),
+    details = {"strength": float(strength), "selected_atoms": sum(sizes),
             "atoms_pushed": int(np.count_nonzero(absolute)),
             "mean_requested_radial_move_angstrom": float(absolute.mean()) if len(absolute) else 0.0,
             "max_requested_radial_move_angstrom": float(absolute.max()) if len(absolute) else 0.0,
             "fraction": float(fraction), "max_step_angstrom": float(max_step)}
+    return details, np.concatenate(selected) if selected else np.array([], dtype=int)
 
 
 def damage_summary(iteration, geometry):

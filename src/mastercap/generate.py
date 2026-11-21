@@ -244,8 +244,21 @@ def update_positions(structure, force, groups, mode):
         structure.xyz[group] = (original-center) @ rotation + target_center
 
 
-def characteristic_forces(force, structure, analysis, metadata):
-    """Weak nearest-neighbor statistical target, subordinate to feasibility."""
+def characteristic_forces(force, structure, analysis, metadata, *, mode="fixed",
+                          margin=0.0, guard=0.003, strength=0.002,
+                          max_move=None, selected_indices=None):
+    """Build a separate neighbor contribution with guarded contact targets.
+
+    Guarding a target is not a guarantee for the combined update. In scaled
+    mode the caller supplies the adaptive coefficient, selected atoms and cap;
+    the cap is applied AFTER all element-pair contributions have accumulated.
+    """
+    if mode not in ("scaled", "off", "fixed"):
+        raise MastercapError("Neighbor forces must be scaled, off or fixed")
+    if mode == "off":
+        return {"mode": mode, "mean_move_angstrom": 0.0, "max_move_angstrom": 0.0,
+                "active_atoms": 0, "strength": 0.0}
+    neighbor = np.zeros_like(force)
     for (a, b), lower in analysis.limits.items():
         summary = analysis.neighbor_samples["-".join((a, b))]["percentiles"]
         if "50" not in summary:
@@ -258,8 +271,25 @@ def characteristic_forces(force, structure, analysis, metadata):
         else:
             nearest = cKDTree(structure.xyz[bi]).query(structure.xyz[ai], k=1)[1]
         pairs = np.column_stack([ai, bi[nearest]])
-        desired = np.full(len(pairs), max(lower+0.003, summary["50"]))
-        pair_forces(force, structure.xyz, pairs, desired, strength=0.002)
+        safe_lower = lower+guard
+        safe_upper = metadata.radii[pairs].sum(axis=1)-margin-guard
+        valid = safe_lower < safe_upper
+        pairs = pairs[valid]
+        if not len(pairs):
+            continue
+        desired = np.clip(summary["50"], safe_lower, safe_upper[valid])
+        pair_forces(neighbor, structure.xyz, pairs, desired, strength=strength)
+    if selected_indices is not None:
+        selected = np.zeros(len(neighbor), dtype=bool)
+        selected[selected_indices] = True
+        neighbor[~selected] = 0
+    norm = np.linalg.norm(neighbor, axis=1)
+    if max_move is not None:
+        neighbor *= np.minimum(1.0, max_move/np.maximum(norm, 1e-12))[:, None]
+        norm = np.linalg.norm(neighbor, axis=1)
+    force += neighbor
+    return {"mode": mode, "strength": float(strength), "active_atoms": int(np.count_nonzero(norm)),
+            "mean_move_angstrom": float(norm.mean()), "max_move_angstrom": float(norm.max())}
 
 
 def search(structure, analysis, edges, profiles, center, rng, mode="independent",
@@ -268,7 +298,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
            progress_interval=5, refine_iterations=None, stage_progress=None,
            selection_objective="total", refine_updates=50, refine_patience=10,
            refine_strength=0.005, refine_max_step=0.05, refine_fraction=0.2,
-           refine_recovery_limit=10):
+           refine_recovery_limit=10, neighbor_forces="scaled"):
     preparation_started = time.monotonic()
     if (max_iterations < 0 or time_limit <= 0 or margin < 0 or progress_interval < 1
             or (refine_iterations is not None and refine_iterations < 0)
@@ -280,6 +310,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         raise MastercapError("Refinement strength/max step must be finite and positive; fraction must be in (0, 1]")
     if selection_objective not in ("total", "worst-element"):
         raise MastercapError("Selection objective must be total or worst-element")
+    if neighbor_forces not in ("scaled", "off", "fixed"):
+        raise MastercapError("Neighbor forces must be scaled, off or fixed")
     if stage_progress:
         stage_progress("Building inventory metadata and initializing particle coordinates")
     metadata = GeometryMetadata.build(structure, analysis.limits)
@@ -408,13 +440,18 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         force += (clipped-radial)[:, None]*direction*0.8
         # Soft radial transport; rank by current radius for each element.
         if geometry["mandatory_pass"]:
-            details = apply_radial_push(force, radial, direction, metadata.element_indices, quantiles,
-                                        controller.strength, refine_max_step, refine_fraction)
+            details, selected = apply_radial_push(force, radial, direction, metadata.element_indices, quantiles,
+                                                  controller.strength, refine_max_step, refine_fraction)
+            scaled = neighbor_forces == "scaled"
+            neighbor_details = characteristic_forces(
+                force, structure, analysis, metadata, mode=neighbor_forces, margin=margin,
+                strength=0.002*(controller.strength/refine_strength) if scaled else 0.002,
+                max_move=refine_max_step/2 if scaled else None,
+                selected_indices=selected if scaled else None)
+            details["neighbor_forces"] = neighbor_details
             controller.start(iteration, structure.xyz, details)
             profile_updates += 1
         force += (center-structure.xyz.mean(axis=0))*0.1
-        if geometry["mandatory_pass"]:
-            characteristic_forces(force, structure, analysis, metadata)
         update_positions(structure, force, groups, mode)
         del local, force
     controller.finish()
@@ -446,6 +483,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                        "starting_strength": refine_strength, "minimum_strength": controller.minimum,
                        "maximum_strength": controller.maximum, "fraction": refine_fraction,
                        "max_step_angstrom": refine_max_step, "recovery_limit": refine_recovery_limit,
+                       "neighbor_forces": neighbor_forces,
                        "big_damage_distance_fraction": 0.0005, "big_damage_component_limit": 50}})
     report["initial_transforms"] = rotations
     return output, report

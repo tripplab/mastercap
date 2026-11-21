@@ -98,8 +98,10 @@ Workflow and defaults:
   (default 0.2), use starting strength 0.005, and cap requested radial moves
   at 0.05 A. Strength adapts, and excessive damage triggers snapshot rollback.
   Refinement can stop on patience or strength floor (refinement_stalled).
-  characteristic_forces is unchanged; its contribution shares the overall
-  position-update cap, not the radial-only 0.05 A cap.
+  --neighbor-forces scaled (default) follows strength and atom selection, with
+  an accumulated per-atom cap of half --refine-max-step; off disables these
+  contributions; fixed uses coefficient 0.002 on all atoms without that cap.
+  Both active modes guard targets inside the distance/contact window.
 
 Acceptance:
   Always require radial bounds, center error <= 1 A, applicable minimum distances,
@@ -251,6 +253,7 @@ def parser():
             command.add_argument("--refine-max-step", type=finite_positive, default=0.05, help="Maximum absolute requested radial profile move per selected atom in A; excludes other forces and rigid projection")
             command.add_argument("--refine-fraction", type=positive_fraction, default=0.2, help="Fraction of atoms per element selected per push; prioritize largest radial mismatches, round count up; must be in (0, 1]")
             command.add_argument("--refine-recovery-limit", type=nonnegative_integer, default=10, help="Maximum repair updates after a damaging push before restoring its snapshot; 0 permits no repair updates")
+            command.add_argument("--neighbor-forces", choices=("scaled", "off", "fixed"), default="scaled", help="Refinement nearest-neighbor forces: scaled follows radial strength, selection and a half-step per-atom cap; off disables them; fixed keeps unscaled 0.002/all-atom behavior. Targets are guarded in both active modes")
             command.add_argument("--overlap-margin", type=finite_nonnegative, default=0.0, help="Extra required vdW overlap in A; must be nonnegative and tangency never qualifies")
             command.add_argument("--profile-tolerance", type=finite_nonnegative, help="Maximum normalized integrated radial error for EACH element; no scientifically calibrated value")
             command.add_argument("--composition-tolerance", type=finite_nonnegative, help="Relative per-element atom-count error limit, with a minimum one-atom allowance")
@@ -330,6 +333,8 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
             or args.refine_strength <= 0 or args.refine_strength > np.finfo(float).max/4
             or args.refine_max_step <= 0 or not 0 < args.refine_fraction <= 1):
         raise MastercapError("Refinement strength/max step must be finite and positive; fraction must be in (0, 1]")
+    if args.neighbor_forces not in ("scaled", "off", "fixed"):
+        raise MastercapError("Neighbor forces must be scaled, off or fixed")
     rng = np.random.default_rng(args.seed)
     edges, profiles = target_profiles(analysis, args.inner_radius, args.outer_radius)
     center = analysis.center if args.center == "reference" else np.zeros(3)
@@ -377,6 +382,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                                          refine_patience=args.refine_patience, refine_strength=args.refine_strength,
                                          refine_max_step=args.refine_max_step, refine_fraction=args.refine_fraction,
                                          refine_recovery_limit=args.refine_recovery_limit,
+                                         neighbor_forces=args.neighbor_forces,
                                          stage_progress=LOG.info)
             except MastercapError:
                 # Search raises only for invalid settings/templates during prep.
