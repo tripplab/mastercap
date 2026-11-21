@@ -48,6 +48,25 @@ atom-weighted total error, then mean element error, then maximum, then count
 difference; `worst-element` restores maximum/mean/total/count ranking. The helper
 and controller live in `refinement.py`; noise-aware selection is not implemented.
 
+Reference neighbor statistics retain their measured values. Analysis separately
+applies canonical, recorded pair-limit overrides and returns the original pooled
+normalized factor. S-S defaults to that factor times 3.60 A: reference sulfur
+spacing is a symmetry/sparsity statistic, not a useful minimum-contact floor.
+Explicit numeric/steric pairs are excluded from statistical neighbor forces;
+reference mode restores the original limit. Validation rebuilds analysis with
+the generation config's effective overrides. A legacy report without override
+records explicitly selects reference limits. No saved-analysis loader exists.
+
+Optional sulfur-residue initialization selects by S element and anchors the first
+S of each residue. It preserves the existing seed's directions/rotations, then
+assigns shuffled S quantile radii (bin midpoints for regular). Solve the positive
+root of the offset equation for residue-center distance, translating the whole
+rotated residue. Other residues sample aggregate target density minus the placed
+residues' contribution. Off and S-free paths preserve all old RNG draws. Private
+anchor arrays support a 0.05 radial spring before first feasibility only; rigid
+projection applies normally. Reports retain summary counts, target-bin counts,
+S errors and anchor deviations/hit fractions.
+
 Default crossing selection computes integer bin counts and target counts scaled
 to each element's inventory. Reserve adjacent surplus/deficit crossing quotas,
 rounded down, preferring the nearest atoms. Request the edge distance plus
@@ -74,6 +93,11 @@ episode budget ends. Unexpected broken geometry logs a warning; three restarts
 are a safety net. Restore slack below 70% acceptance or every 10 pushes, with
 at least two pushes between episodes and up to three checked updates each.
 Both triggers can be disabled. Final validation rules do not use slack.
+
+Non-contact windows (contact threshold <= minimum separation) use full distance
+slack and no contact pull. Positive narrow windows still use window/3. The
+on/off switch permits a strict v0.1.6 control when combined with S-S=reference;
+the default is on. This affects consolidation proposals only, never limits.
 
 Nearest-neighbor contributions are off by default. The required reporting-only
 1CWP A/B comparison reached total error 0.058776 with off versus 0.060828 with
@@ -109,6 +133,19 @@ counts selected proposals, including feasible stationary rounded proposals,
 expanded to complete residues in rigid mode. Actual moving/retained atoms are
 reported separately. Rounded zero-move trials count toward budget/patience; rejected proposals
 also consume a push. A private snapshot provides a validation safety net.
+
+Too-close attribution deduplicates rejected atom/pair-type occurrences across
+trial passes. Global and per-element counters may overlap across pair types;
+rigid undo expansion is separate from direct offenders. Sum counters across
+pushes and log the top three sulfur pair types.
+
+After writing/rereading, connectivity_audit builds a fresh spatial tree, contact
+edges, degree and global graph without calling local_geometry or components.
+Per-residue sparse subgraphs are independently checked, including singleton
+residues' global degree. Bounded examples retain file order, PDB serial and
+residue identities. Any isolation, extra component, disconnected residue or
+disagreement with validate_geometry raises before publication. Standalone validate
+runs the same independent audit; neither status nor approximation bypasses it.
 
 The revision-02 three-seed matrix improves total error beyond the seed spread
 and completes all 50 default pushes with 83-87% global acceptance, but its full

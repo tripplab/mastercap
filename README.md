@@ -1,11 +1,15 @@
 # mastercap
 
-**Current version: 0.1.6**
+**Current version: 0.1.7**
 
 Reference-driven generation of spherical geometric capsid particles in Python.
 Particles approximate the radial element density and residue composition of an
 **already expanded, complete protein capsid**. They are for geometry and
 visualization, not chemically valid protein design or molecular dynamics.
+
+Version 0.1.7 adds an independent final connectivity audit, recorded pair-limit
+overrides (S-S=steric by default), and optional reference-derived sulfur-shell
+initialization. Sulfur placement remains off unless explicitly selected.
 
 **Status:** initial implementation, tested on controlled synthetic structures.
 CCMV 1CWP calibration, full-capsid performance, and VMD compatibility are pending.
@@ -251,6 +255,7 @@ validation remains independent.
 | `--refine-slack` | 0.02 A | Target distance/contact margin during consolidation and neighbor targeting; final validation limits remain unchanged. |
 | `--consolidate-iterations` | 10 | Checked slack-building updates before profile pushes; 0 disables the initial episode. |
 | `--consolidate-target` | 0.001 | Each count of pairs/edges within half the requested slack must be at most this fraction of atom count. |
+| `--consolidate-noncontact-slack` | `on` | Build full distance-side slack for pairs that cannot form a vdW contact; `off` restores v0.1.6 consolidation for comparison. |
 | `--reconsolidate-below` | 0.7 | Restore slack after lower acceptance; 0 disables this trigger. |
 | `--reconsolidate-every` | 10 | Restore slack after this many pushes since the last episode; 0 disables. |
 | `--reconsolidate-iterations` | 3 | Maximum checked updates per restoration episode; 0 disables restoration. |
@@ -425,6 +430,52 @@ different elements. Pairs with fewer than `--min-pair-samples` observations
 (provisional default 100) use a pooled percentile of distances normalized by vdW
 radius sums. Fallbacks are reported. Incompatible pairs cannot provide connections.
 
+`--pair-limit-override PAIR=VALUE` is repeatable on analyze, generate and validate.
+Pairs are normalized (N-C and C-N are the same); duplicates and unknown elements
+are errors before input is read. VALUE is a positive finite distance in A,
+`steric` (the pooled normalized fallback times the pair's vdW radius sum), or
+`reference` (retain the measured percentile). **S-S=steric is the default**:
+reference S-S nearest-neighbor spacing reflects rare-element symmetry rather
+than a steric floor. `--pair-limit-override S-S=reference` restores that spacing.
+All other measured pair limits remain unchanged unless explicitly overridden.
+Overrides apply only to pairs represented in the reference, and preserve a
+positive minimum separation. Measured neighbor samples remain unchanged;
+statistical neighbor forces skip pairs with a numeric/steric override.
+
+Analysis records `grouped_distance_factor` and `distance_limit_overrides` with
+original/applied values, mode and reason. Generation config saves the effective
+override list. Independent validation reapplies that saved list, regardless of
+its CLI defaults; reports predating override records explicitly use reference
+limits and log that compatibility choice. Analysis is rebuilt from the reference;
+there is no separate saved-analysis loader in this version.
+
+### Optional sulfur residue placement
+
+`--sulfur-residue-placement profile` anchors the first S atom in every
+S-containing residue, selected by element rather than residue name. It preserves
+the seed's existing directions and rotations, and assigns volume-quantile S
+radii in a seeded random order. Regular initialization moves these targets to
+bin midpoints; random initialization keeps the quantile radii. Translating the
+whole rotated residue solves the anchor offset so that S, rather than the residue
+centroid, lies at the target radius. This copies the reference's sulfur shells
+by design. Remaining residues sample the aggregate density after subtracting the
+placed residues' atom-density contribution, clipped at zero.
+
+The default `off` preserves v0.1.6 initialization coordinates and RNG draws.
+With no S, profile mode logs no effect and behaves exactly as off. A summary
+warns about multi-S residues, where only the first S is anchored. A weak 0.05
+radial spring on anchored S acts only before first feasible geometry, through
+the existing rigid projection when requested; checked profile pushes contain
+no anchor spring. `search.sulfur_placement` reports residue counts/names, target
+bin counts, S errors at initialization/first feasibility/final output, anchor
+in-target-bin counts/fractions, first-feasible radial deviations and repair-spring
+statistics. Anchor indices/radii remain private rather than per-atom JSON arrays.
+
+When contact distance minus minimum separation is nonpositive, consolidation
+now builds full distance-side slack and never applies a contact pull. Positive
+narrow windows still use one third of their width. Disable this optional change
+with `--consolidate-noncontact-slack off` when isolating v0.1.6 behavior.
+
 Rigid internal distances are preserved even below inferred limits, with
 exceptions reported. Required internally disconnected rigid templates cause
 failure. `--allow-independent-fallback` explicitly authorizes a retry with
@@ -474,6 +525,16 @@ rereads the written PDB and rebuilds its geometry checks.
 ## Acceptance and reports
 
 JSON is mandatory. CSV profiles (`--csv`) and PNG plots (`--plot`) are optional.
+After PDB writing and rereading, `connectivity_audit` builds a fresh contact
+graph independently of the search's local graph/helper. It checks strict positive
+vdW overlap, atom degree, global components and each residue's internal subgraph.
+Single-atom residues are internally connected but still require a global contact.
+Any isolated atom, multiple components, internally disconnected residue or
+disagreement with `validate_geometry` is a hard failure before publication.
+Errors identify file-order indices, PDB serials, atom/residue names, chains and
+residue numbers. The audit records the largest component sizes and bounded atom/
+residue examples. Generate and standalone validate both run it; approximation
+cannot bypass it. A success INFO line reports N atoms and M edges.
 Reports include original, smoothed and generated profiles; element counts;
 integrated profile errors; geometry and graph checks; nearest-distance percentile
 comparisons; provenance; residue transformations/deformation RMSD; seed; software
@@ -519,6 +580,12 @@ broken-contact rejections, actual bin crossings (improved/worsened/neutral L1
 count error) and `profile_error_change` (after minus before). Crossing attribution
 updates bin counts in atom-index order so multiple moves cannot all claim the
 same deficit. Masks and coordinate arrays remain private.
+`undone_too_close_by_pair` attributes rejections to sorted element pairs, both
+globally and per element. Counts deduplicate an atom/pair type across trial
+passes; one atom can contribute to several pair types. They identify direct
+offenders before whole-residue rejection expands the undo. The search report
+sums these counts over pushes and lists the top three sulfur pairs, also logged
+at the end. These are rejection occurrences across pushes, not unique run atoms.
 `acceptance_mode`, `committed_pushes`, `mean_acceptance_fraction`,
 `recoveries_improved`, `recoveries_worse`, `repair_attempts` and `blocked_evidence`
 support the final console summary. A committed push has at least one retained

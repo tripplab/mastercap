@@ -154,6 +154,7 @@ def read_pdb(path, model=1, generated=False):
             residue += 1
             previous_key = key
         origin = {"line": number, "model": model, "segment": segment,
+                  "serial": int(line[6:11]) if line[6:11].strip().isdigit() else None,
                   "chain": line[21].strip(), "residue_number": line[22:26].strip(),
                   "insertion_code": line[26].strip(), "residue_name": resname}
         atoms.append(Atom(name, element, resname, residue, origin))

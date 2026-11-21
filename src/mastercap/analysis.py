@@ -1,5 +1,5 @@
 """Volume-aware radial profiles and nearest-element reference statistics."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import combinations_with_replacement
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
@@ -19,6 +19,8 @@ class Analysis:
     warnings: list
     excluded: int
     smoothing_sigma: float = 0.0
+    distance_limit_overrides: list = field(default_factory=list)
+    grouped_distance_factor: float | None = None
 
     @property
     def inner(self):
@@ -43,6 +45,8 @@ class Analysis:
                              "original": {e: p.tolist() for e, p in self.original.items()},
                              "smoothed": {e: p.tolist() for e, p in self.smoothed.items()}},
                 "distance_limits": {"-".join(k): v for k, v in self.limits.items()},
+                "distance_limit_overrides": self.distance_limit_overrides,
+                "grouped_distance_factor": self.grouped_distance_factor,
                 "neighbor_samples": self.neighbor_samples}
 
 
@@ -96,11 +100,57 @@ def distance_statistics(structure, percentile=1, min_samples=100):
         limits[pair] = float(grouped * sum(VDW[e] for e in pair) if fallback else np.percentile(values, percentile))
         report["-".join(pair)] = {"count": len(values), "grouped_fallback": fallback,
                                   "percentiles": {str(p): float(np.percentile(values, p)) for p in (1, 50, 99)} if len(values) else {}}
-    return limits, report
+    return limits, report, grouped
+
+
+def parse_limit_override(spec):
+    try:
+        pair, value = spec.split("=")
+        names = pair.upper().split("-")
+        if len(names) != 2 or any(name not in VDW for name in names):
+            raise ValueError
+        value = value.lower()
+        if value not in ("steric", "reference"):
+            number = float(value)
+            if not np.isfinite(number) or number <= 0:
+                raise ValueError
+            value = str(number)
+        return "-".join(sorted(names))+"="+value
+    except (ValueError, AttributeError):
+        raise MastercapError(f"Invalid pair-limit override {spec!r}; use ELEMENT-ELEMENT=positive_A|steric|reference") from None
+
+
+def resolve_limit_overrides(overrides=None):
+    resolved = {}
+    for spec in overrides or []:
+        spec = parse_limit_override(spec)
+        pair, value = spec.split("=")
+        if pair in resolved:
+            raise MastercapError(f"Pair {pair} specified twice")
+        resolved[pair] = value
+    resolved.setdefault("S-S", "steric")
+    return [f"{pair}={value}" for pair, value in sorted(resolved.items())]
+
+
+def apply_limit_overrides(limits, grouped, overrides=None):
+    result, records = limits.copy(), []
+    for spec in resolve_limit_overrides(overrides):
+        pair, value = spec.split("=")
+        key = tuple(pair.split("-"))
+        if key not in limits:
+            continue
+        mode = value if value in ("steric", "reference") else "number"
+        new = (grouped*sum(VDW[e] for e in key) if mode == "steric" else
+               limits[key] if mode == "reference" else float(value))
+        result[key] = float(new)
+        records.append({"pair": pair, "original_value": limits[key], "new_value": float(new), "mode": mode,
+                        "reason": "statistical spacing, not a steric limit" if pair == "S-S" and mode == "steric"
+                        else "user-selected distance limit"})
+    return result, records
 
 
 def analyze(structure, width=1.0, sigma=1.0, radius_method="extrema", percentiles=(0.5, 99.5),
-            distance_percentile=1.0, min_samples=100, progress=None):
+            distance_percentile=1.0, min_samples=100, progress=None, pair_limit_overrides=None):
     if not np.isfinite([width, sigma]).all() or width <= 0 or sigma < 0:
         raise MastercapError("Bin width must be positive and smoothing sigma nonnegative")
     if progress:
@@ -128,7 +178,12 @@ def analyze(structure, width=1.0, sigma=1.0, radius_method="extrema", percentile
         smooth[e] = filtered * (np.sum(profile * volume) / np.sum(filtered * volume))
     if progress:
         progress("Estimating element-pair nearest-neighbor distance limits")
-    limits, samples = distance_statistics(selected, distance_percentile, min_samples)
+    limits, samples, grouped = distance_statistics(selected, distance_percentile, min_samples)
+    limits, override_records = apply_limit_overrides(limits, grouped, pair_limit_overrides)
+    if progress:
+        for entry in override_records:
+            progress(f"Distance limit override: {entry['pair']} {entry['original_value']:.3f} -> "
+                     f"{entry['new_value']:.3f} A ({entry['mode']})")
     warnings = selected.warnings.copy()
     warnings.append("Input is assumed to contain an already expanded complete capsid; assembly was not reconstructed")
     directions = selected.xyz - center
@@ -141,7 +196,8 @@ def analyze(structure, width=1.0, sigma=1.0, radius_method="extrema", percentile
     excluded = len(structure.atoms) - len(selected.atoms)
     if excluded:
         warnings.append(f"Excluded {excluded} atoms outside selected radial interval; residues may be partial")
-    return Analysis(selected, center, edges, original, smooth, limits, samples, warnings, excluded, sigma)
+    return Analysis(selected, center, edges, original, smooth, limits, samples, warnings, excluded, sigma,
+                    override_records, grouped)
 
 
 def target_profiles(analysis, inner=None, outer=None):

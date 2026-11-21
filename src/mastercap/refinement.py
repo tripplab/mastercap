@@ -179,12 +179,14 @@ def slack_summary(local, metadata, margin=0.0, mode="independent", slack=0.02):
     return result
 
 
-def consolidation_targets(local, metadata, slack, margin=0.0, mode="independent"):
+def consolidation_targets(local, metadata, slack, margin=0.0, mode="independent", noncontact_slack=True):
     """Return pairs and nonconflicting guarded targets for slack building."""
     pairs, distance, lower = local["pairs"], local["distances"], local["lower"]
     upper = metadata.radii[pairs].sum(axis=1)-margin
     window = upper-lower
-    guard = np.where(window < 2*slack, np.maximum(window, 0)/3, slack)
+    guard = np.where((window > 0) & (window < 2*slack), window/3, slack)
+    if not noncontact_slack:
+        guard = np.where(window <= 0, 0, guard)
     eligible = np.ones(len(pairs), dtype=bool)
     if mode == "residue":
         eligible &= metadata.residues[pairs[:, 0]] != metadata.residues[pairs[:, 1]]
@@ -295,12 +297,22 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
         eligible &= metadata.residues[pairs[:, 0]] != metadata.residues[pairs[:, 1]]
     reasons = {name: np.zeros(len(snapshot), dtype=bool)
                for name in ("too_close", "contact_broken", "out_of_bounds")}
+    pair_rejections = {}
 
     def offenders():
         moving = np.any(trial != snapshot, axis=1)
         reject = np.zeros(len(snapshot), dtype=bool)
         distance = np.linalg.norm(trial[pairs[:, 0]]-trial[pairs[:, 1]], axis=1)
         bad = eligible & moving[pairs].any(axis=1) & (distance < lower+0.003)
+        offending_pairs = pairs[bad]
+        if len(offending_pairs):
+            types = np.sort(metadata.codes[offending_pairs], axis=1)
+            for kind in np.unique(types, axis=0):
+                affected = np.unique(offending_pairs[np.all(types == kind, axis=1)])
+                affected = affected[moving[affected]]
+                example = offending_pairs[np.flatnonzero(np.all(types == kind, axis=1))[0]]
+                name = "-".join(sorted(metadata.elements[example]))
+                pair_rejections.setdefault(name, set()).update(affected.tolist())
         close = np.unique(pairs[bad])
         reasons["too_close"][close] |= moving[close]
         reject[close] = True
@@ -352,11 +364,17 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
                        "undone_too_close": int(reasons["too_close"][ix].sum()),
                        "undone_contact_broken": int(reasons["contact_broken"][ix].sum())}
                    for e, ix in metadata.element_indices.items()}
+    by_pair = {name: len(indices) for name, indices in sorted(pair_rejections.items()) if indices}
+    for e in per_element:
+        per_element[e]["undone_too_close_by_pair"] = {
+            name: count for name, indices in sorted(pair_rejections.items())
+            if (count := int(np.count_nonzero(metadata.elements[np.fromiter(indices, dtype=int)] == e)))}
     details = {"atoms_proposed": count, "atoms_accepted": int(retained.sum()),
                    "atoms_undone": int(count-retained.sum()), "atoms_moved": int(accepted.sum()),
                    "proposed_moving_atoms": int(proposed.sum()),
                    "stationary_proposals": int(np.count_nonzero(proposals & ~proposed)),
                    "undone_by_reason": {name: int(mask.sum()) for name, mask in reasons.items()},
+                   "undone_too_close_by_pair": by_pair,
                    "acceptance_fraction": float(retained.sum()/count) if count else 1.0,
                    "check_passes": passes, "expanded_undo_atoms": expanded,
                    "safety_reverted_all": safety_reverted_all, "center_rejected": center_rejected,

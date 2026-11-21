@@ -14,14 +14,36 @@ import numpy as np
 import scipy
 
 from . import __version__
-from .analysis import analyze, target_profiles, distance_statistics
-from .constraints import acceptance, profile_metrics, validate_geometry
+from .analysis import (analyze, target_profiles, distance_statistics, parse_limit_override,
+                       resolve_limit_overrides)
+from .constraints import (acceptance, profile_metrics, validate_geometry,
+                          connectivity_audit, require_connectivity_audit)
 from .generate import select_inventory, search, residue_transforms
 from .model import Atom, MastercapError
 from .pdbio import download, read_pdb, pdb_text
 from .reports import encode_json, preflight, publish, profile_csv, profile_png
 
 LOG = logging.getLogger("mastercap")
+
+
+class PairLimitAction(argparse.Action):
+    def __call__(self, parser, namespace, value, option_string=None):
+        try:
+            value = parse_limit_override(value)
+            current = list(getattr(namespace, self.dest) or [])
+            if any(spec.split("=")[0] == value.split("=")[0] for spec in current):
+                raise MastercapError(f"Pair {value.split('=')[0]} specified twice")
+        except MastercapError as exc:
+            raise argparse.ArgumentError(self, str(exc)) from exc
+        setattr(namespace, self.dest, current+[value])
+
+
+def final_connectivity_check(structure, margin, geometry, report):
+    audit = connectivity_audit(structure, margin)
+    report["connectivity_audit"] = audit
+    require_connectivity_audit(audit, geometry)
+    LOG.info("Success! Final connectivity audit: 0 isolated atoms, 1 component, 0 disconnected residues (%d atoms, %d edges)",
+             audit["atom_count"], audit["edge_count"])
 
 
 class DetailedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
@@ -34,6 +56,7 @@ class DetailedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.Raw
         "profile_tolerance": "unset (uncalibrated)",
         "composition_tolerance": "unset (uncalibrated)",
         "refine_iterations": "no additional iteration cap",
+        "pair_limit_override": "S-S=steric",
     }
 
     def _get_help_string(self, action):
@@ -71,6 +94,9 @@ Input and output:
   ignored; HETATM and nonprotein records are excluded; alternate positions fail.
   --input and --id are mutually exclusive. Downloads use VIPERdb with TLS checks
   by default; --no-check-certificate explicitly disables them for downloads.
+  Pair limits default to S-S=steric: a pooled positive floor replaces sulfur's
+  symmetry spacing statistic. Repeat --pair-limit-override PAIR=VALUE for a
+  positive A value, steric or reference; S-S=reference restores old behavior.
   Writes PREFIX.json and, when requested, PREFIX_profiles.csv / .png; no PDB.
   Element-inference and other reference warnings stay in JSON, with one terminal
   summary (suppressed by --quiet).""",
@@ -119,6 +145,15 @@ Workflow and defaults:
   an accumulated per-atom cap of half --refine-max-step; off disables these
   contributions; fixed uses coefficient 0.002 on all atoms without that cap.
   Both active modes guard targets inside the distance/contact window.
+  S-S=steric is the default distance override; measured neighbor statistics
+  remain unchanged and every applied limit is recorded. S-S=reference restores
+  the old sulfur spacing limit. Optional --sulfur-residue-placement profile
+  copies reference S shells by anchoring S-containing residues at initialization
+  and using a weak repair-only spring; off preserves the old random draws.
+  --consolidate-noncontact-slack on builds distance-side slack even for pairs
+  that cannot overlap; off permits an exact v0.1.6 consolidation comparison.
+  Before publication, a fresh independent connectivity audit checks the reread
+  PDB and reports specific atoms on any failure; --allow-approximate cannot bypass it.
 
 Acceptance:
   Always require radial bounds, center error <= 1 A, applicable minimum distances,
@@ -236,6 +271,7 @@ def parser():
                                  formatter_class=DetailedHelpFormatter,
                                  epilog=COMMAND_EXAMPLES[name]+(SMOOTHING_HELP if name != "validate" else "")+"\n"+EXIT_HELP)
         result.command_parsers.append(command)
+        command.add_argument("--pair-limit-override", action=PairLimitAction, metavar="PAIR=VALUE", help="Repeatable positive A/steric/reference distance override; default S-S=steric. Use S-S=reference for old spacing. Validation always applies saved report overrides")
         source = command.add_mutually_exclusive_group(required=True)
         source.add_argument("--input", type=Path, help="Local expanded .pdb/.vdb, optionally gzip compressed; required alternative to --id")
         source.add_argument("--id", help="Four-character VIPERdb identifier, e.g. 1cwp; required alternative to --input")
@@ -264,6 +300,7 @@ def parser():
             command.add_argument("--outer-radius", type=finite_positive, help="Outer atom-center radius in A; overrides do not change local density targets")
             command.add_argument("--center", choices=("reference", "origin"), default="reference", help="Target center: reference coordinate mean or origin (0, 0, 0)")
             command.add_argument("--mode", choices=("independent", "residue"), default="independent", help="Move individual atoms (independent) or preserve observed residue geometry with rigid moves (residue)")
+            command.add_argument("--sulfur-residue-placement", choices=("off", "profile"), default="off", help="Optionally anchor the first S of each S-containing residue to the reference S profile at initialization; regular uses bin midpoints. Repair-only spring; copies reference S shells by design")
             command.add_argument("--distribution", choices=("random", "regular"), default="random", help="Random isotropic or regular spherical-layer initialization; repair may move initial positions")
             command.add_argument("--seed", type=int, help="Nonnegative random seed for reproducible generation")
             command.add_argument("--max-iterations", type=int, default=1000, help="Maximum repair steps per attempt; nonnegative, provisional")
@@ -284,6 +321,7 @@ def parser():
             command.add_argument("--refine-slack", type=finite_nonnegative, default=0.02, help="Target distance/contact slack in A during consolidation and neighbor targeting; final validation limits are unchanged")
             command.add_argument("--consolidate-iterations", type=nonnegative_integer, default=10, help="Maximum checked consolidation updates before refinement; 0 disables initial consolidation; restarts only as a safety net")
             command.add_argument("--consolidate-target", type=unit_fraction, default=0.001, help="Stop checked consolidation when each near-limit pair/edge count is at most this fraction of atom count, or improvement falls below 5 percent; at least one update")
+            command.add_argument("--consolidate-noncontact-slack", choices=("on", "off"), default="on", help="Build full distance-side slack for pairs whose minimum separation precludes vdW contact; off restores v0.1.6 consolidation for comparison")
             command.add_argument("--reconsolidate-below", type=unit_fraction, default=0.7, help="Restore slack after a push with lower acceptance than this fraction; 0 disables; at least 2 pushes between episodes")
             command.add_argument("--reconsolidate-every", type=nonnegative_integer, default=10, help="Restore slack after this many pushes since the last episode; 0 disables periodic restoration")
             command.add_argument("--reconsolidate-iterations", type=nonnegative_integer, default=3, help="Maximum checked updates per slack-restoration episode; these consume time/iterations but not pushes; 0 disables episodes")
@@ -314,7 +352,8 @@ def reference(args):
 def analysis_options(args):
     return {"width": args.bin_width, "sigma": 0.0 if args.no_smoothing else args.smoothing_sigma,
             "radius_method": args.radius_method, "percentiles": args.radius_percentiles,
-            "distance_percentile": args.distance_percentile, "min_samples": args.min_pair_samples}
+            "distance_percentile": args.distance_percentile, "min_samples": args.min_pair_samples,
+            "pair_limit_overrides": resolve_limit_overrides(args.pair_limit_override)}
 
 
 def artifacts(prefix, csv=False, plot=False, pdb=False):
@@ -436,6 +475,8 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                                          refine_strength_control=args.refine_strength_control,
                                          refine_min_step=args.refine_min_step,
                                          refine_selection=args.refine_selection,
+                                         sulfur_residue_placement=args.sulfur_residue_placement,
+                                         consolidate_noncontact_slack=args.consolidate_noncontact_slack,
                                          consolidate_target=args.consolidate_target,
                                          reconsolidate_below=args.reconsolidate_below,
                                          reconsolidate_every=args.reconsolidate_every,
@@ -479,6 +520,9 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                  f"{np.median(recoveries):g}" if search_report.get("repair_attempts", 0) else "0 attempted")
         if particle is None:
             raise MastercapError(f"Search ended ({search_report.get('termination', 'preparation_error')}) without a candidate satisfying every mandatory constraint")
+        if "S" in profiles:
+            LOG.info("Top S too-close rejection pairs: %s", ", ".join(
+                f"{entry['pair']}={entry['count']}" for entry in search_report.get("sulfur_top_rejection_pairs", [])) or "none")
         LOG.info("Selected feasible candidate from iteration %d; preparing PDB export", search_report["candidate_iteration"])
         export_started = time.monotonic()
         text, mapping = pdb_text(particle)
@@ -491,6 +535,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
             raise MastercapError("PDB reread changed the atom count")
         # Use actual PDB groups to check serialization did not merge residues.
         geometry = validate_geometry(reread, center, edges, analysis.limits, args.overlap_margin, mode)
+        final_connectivity_check(reread, args.overlap_margin, geometry, report)
         metrics = profile_metrics(reread, center, edges, profiles, analysis.original)
         status = acceptance(geometry, metrics, args.profile_tolerance, args.composition_tolerance)
         report.update({"geometry": geometry, "metrics": metrics, "status": status})
@@ -503,7 +548,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
             for element, values in metrics["elements"].items()))
         particle.xyz = reread.xyz
         LOG.info("Computing final neighbor statistics and residue provenance")
-        _, generated_neighbors = distance_statistics(particle, args.distance_percentile, args.min_pair_samples)
+        _, generated_neighbors, _ = distance_statistics(particle, args.distance_percentile, args.min_pair_samples)
         neighbor_comparison = {}
         for pair, observed in generated_neighbors.items():
             baseline = analysis.neighbor_samples[pair]
@@ -533,6 +578,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
         timings.setdefault("preparation", time.monotonic()-started-timings["search"])
         report.update({"status": "failed", "error": str(exc) or "Interrupted by user",
                        "elapsed_seconds": time.monotonic()-started})
+        LOG.error("%s", report["error"])
         diagnostic(args, report, [source])
         return 130 if isinstance(exc, KeyboardInterrupt) else 1
 
@@ -543,8 +589,13 @@ def validate_command(args, source, started, names):
     if saved.get("schema_version") != 1 or "pdb_sha256" not in saved:
         raise MastercapError("Report is not a supported successful generation report")
     LOG.info("Reading reference coordinates for validation")
-    analysis = analyze(read_pdb(source, saved["analysis"]["reference"]["model"]),
-                       **saved["analysis_options"], progress=LOG.info)
+    options = dict(saved["analysis_options"])
+    if "distance_limit_overrides" not in saved["analysis"]:
+        options["pair_limit_overrides"] = ["S-S=reference"]
+        LOG.info("Legacy report has no distance-limit override record; using reference limits")
+    else:
+        options["pair_limit_overrides"] = saved["configuration"].get("pair_limit_override", options.get("pair_limit_overrides"))
+    analysis = analyze(read_pdb(source, saved["analysis"]["reference"]["model"]), **options, progress=LOG.info)
     if analysis.structure.provenance["sha256"] != saved["analysis"]["reference"]["sha256"]:
         raise MastercapError("Reference SHA-256 does not match the generation report")
     log_warning_summary(analysis.warnings)
@@ -568,12 +619,15 @@ def validate_command(args, source, started, names):
             raise MastercapError("PDB atom identity does not match reference provenance")
     LOG.info("Validating geometry, connectivity and radial profiles")
     geometry = validate_geometry(particle, center, edges, analysis.limits, config["overlap_margin"], saved["effective_mode"])
+    audit_report = {}
+    final_connectivity_check(particle, config["overlap_margin"], geometry, audit_report)
     metrics = profile_metrics(particle, center, edges, profiles, analysis.original)
     status = acceptance(geometry, metrics, config["profile_tolerance"], config["composition_tolerance"])
     report = base_report(args, started)
-    report.update({"status": status, "geometry": geometry, "metrics": metrics,
+    report.update({"status": status, "geometry": geometry, "metrics": metrics, **audit_report,
                    "validated_pdb": str(args.pdb), "reference": analysis.structure.provenance,
-                   "warnings": analysis.warnings})
+                   "warnings": analysis.warnings, "distance_limit_overrides": analysis.distance_limit_overrides,
+                   "distance_limits": {"-".join(k): v for k, v in analysis.limits.items()}})
     files = {names["json"]: encode_json(report)}
     extra_profiles(files, names, edges, analysis.original, profiles, metrics["generated_profiles"],
                    smoothing_enabled=analysis.smoothing_sigma > 0)
@@ -634,6 +688,7 @@ def run(args):
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    args.pair_limit_override = resolve_limit_overrides(args.pair_limit_override)
     logging.basicConfig(level=logging.ERROR if args.quiet else logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s: %(message)s", force=True)
     LOG.info("mastercap %s", __version__)

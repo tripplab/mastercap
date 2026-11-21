@@ -95,13 +95,16 @@ def test_validation_plot_honors_no_smoothing_in_legacy_report(tmp_path, small_pd
     report = json.loads(report_path.read_text())
     report["mastercap_version"] = "0.1.2"
     report["analysis"].pop("smoothing")
+    report["analysis"].pop("distance_limit_overrides")
+    report["analysis_options"].pop("pair_limit_overrides")
     for field in ("progress_interval", "refine_iterations", "no_check_certificate", "selection_objective",
                   "refine_updates", "refine_patience", "refine_strength", "refine_max_step",
                   "refine_fraction", "refine_recovery_limit", "neighbor_forces", "refine_slack",
                   "consolidate_iterations", "refine_acceptance", "rollback_violation_fraction",
                   "rollback_component_limit", "refine_strength_control", "refine_min_step",
                   "consolidate_target", "reconsolidate_below", "reconsolidate_every",
-                  "reconsolidate_iterations", "refine_selection"):
+                  "reconsolidate_iterations", "refine_selection", "pair_limit_override",
+                  "sulfur_residue_placement", "consolidate_noncontact_slack"):
         report["configuration"].pop(field)
     report_path.write_text(json.dumps(report))
     settings = []
@@ -152,7 +155,9 @@ def test_stage_messages_precede_warning_and_show_refinement(tmp_path, small_pdb,
     ("--refine-min-step", "-1"), ("--refine-min-step", "nan"), ("--consolidate-target", "1.1"),
     ("--reconsolidate-below", "-1"), ("--reconsolidate-below", "1.1"),
     ("--reconsolidate-every", "-1"), ("--reconsolidate-iterations", "-1"),
-    ("--refine-strength-control", "invalid"), ("--refine-selection", "invalid")])
+    ("--refine-strength-control", "invalid"), ("--refine-selection", "invalid"),
+    ("--sulfur-residue-placement", "invalid"), ("--consolidate-noncontact-slack", "invalid"),
+    ("--pair-limit-override", "S-S=nan")])
 def test_invalid_progress_and_refinement_fail_before_input(option, value, capsys):
     with pytest.raises(SystemExit) as stopped:
         main(["generate", "--input", "missing.pdb", "--output-prefix", "out", option, value])
