@@ -244,3 +244,17 @@ standalone validation. A time-limit warning explicitly states that a seed alone
 cannot reproduce clock-limited results. The exact/dead-zone/disabled spring
 comparison is recorded before tuning; do not replace a refuted diagnosis with
 an assumed improvement. See `revision04` in the benchmark evidence.
+
+Measured revision-04 outcomes: all ten main cases finish 50 pushes, all thirteen
+PDBs (including spring controls) pass both independent audits and standalone
+validation, and every unsmoothed placed run has S error 0. The main matrix's
+smallest S-S distance is 2.789399 A, above 2.786177 A. Scientific expectations
+remain unmet: every placed case has a C/N/O regression at equal 50-push budget,
+and profile first feasibility is 455/248/121 versus off's 62/64/68. Controls
+exact/dead-zone/disabled reach 531/455/63; the disabled case loses one anchor's
+bin. A probe finds three ASP fragments next to one active CYS spring outlier
+(N-S 3.49 A), suggesting a coupled local packing problem. Do not equate fewer
+restrained S atoms or perfect S bin counts with faster geometry repair. The
+smoothed case has S error 0.001207 against a different target and is recorded
+separately. All outputs remain uncalibrated; the quality gates are explicit
+false values in revision04 rather than hidden by successful validity checks.

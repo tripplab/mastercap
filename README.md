@@ -396,8 +396,8 @@ Revision 03 benchmarks compare the measured S-S spacing (`S-S=reference`), the
 v0.1.7 pooled steric limit, and opt-in sulfur-profile placement. The default
 placement remains `off`. For an exact v0.1.6 comparison also pass
 `--consolidate-noncontact-slack off`, since consolidation slack is a separate
-changed default. With both compatibility switches, seed 42 reproduces the old
-PDB byte for byte. Independent validation also accepts the old v0.1.6 report
+changed default. In that v0.1.7 benchmark, both compatibility switches reproduce the seed-42
+PDB byte for byte. The v0.1.8 inter-residue floor is an additional constraint. Independent validation also accepts the old v0.1.6 report
 using its reference limits.
 
 Profile placement deliberately copies reference S shells. Zero S profile error
@@ -431,6 +431,57 @@ assigned bins. It stopped at the time limit after 40 pushes. Its target differs
 from the unsmoothed cases, so these errors are not a matched smoothing A/B test.
 All eleven revision-03 runs passed both the written-PDB audit and standalone
 validation with their saved distance overrides; outputs remain `uncalibrated`.
+
+The nine unsmoothed v0.1.8 benchmark runs use a 1800 s budget and all complete
+50 pushes. These comparisons share 4 A bins, regular initialization and the new
+S-S steric limit. All six placed runs retain S error 0:
+
+| Seed | Off total error | Profile total error | Reference total error | First feasible (off / profile / reference) |
+|---|---:|---:|---:|---|
+| 42 | 0.051408 | 0.051660 | 0.051371 | 62 / 455 / 201 |
+| 7 | 0.053805 | 0.049599 | 0.047892 | 64 / 248 / 222 |
+| 2026 | 0.049907 | 0.048517 | 0.050028 | 68 / 121 / 293 |
+
+**The strict scientific expectations do not all pass.** Every placed run has at
+least one C/N/O error higher than its seed-matched control at 50 pushes. Total
+error improves in four of six comparisons, but worsens for seed-42 profile and
+seed-2026 reference placement. For seed 42 profile, the C/N/O error changes are
++0.004814 / -0.010283 / +0.004078, and total error increases by 0.000252 despite
+S reaching zero. Full per-element comparisons at pushes 10/20/30/40/50 are in
+`revision04.paired_comparisons` in the benchmark JSON; initial errors and repair
+history are retained as well.
+
+The predeclared seed-42 spring controls use zero profile pushes and an extended
+1800 s diagnostic budget to observe first feasibility:
+
+| Spring control | First feasible iteration | Search seconds | S error |
+|---|---:|---:|---:|
+| Exact radius, tolerance 0 | 531 | 840.4 | 0 |
+| Dead zone, tolerance 1.5 A | 455 | 718.5 | 0 |
+| Disabled diagnostic control | 63 | 104.1 | 0.003704 |
+
+The dead zone reduces iterations about 14% versus exact anchoring, but misses
+the expected near-80 result. Both enabled controls exceed the old 600 s budget.
+The disabled control lets one S leave its assigned bin. At iteration 100, a
+coordinate probe finds one ASP split into N, CA and a six-atom fragment; its N
+is 3.49 A from the one CYS S outside its dead zone. This suggests coupled local
+packing, rather than proving that all S atoms are overconstrained. The full
+seed-42 profile run repeats first feasibility at iteration 455 under a different
+workload. Reference placement reports 45 distinct target radii at 1e-6 A and nine
+shells separated by > 0.01 A, preserving the actual finite-precision reference.
+
+The smoothed seed-42 profile case (sigma 1 A) also completes 50 pushes: total
+error 0.053226, S error 0.001207, first feasibility at iteration 435. Its target
+differs from the unsmoothed cases, so it is not a matched smoothing A/B test.
+All ten main runs stop with `refinement_complete`; none hits the clock or
+iteration limit. Search times range from 353.0 to 1139.8 s in this environment.
+All thirteen PDBs, including the three spring controls, pass both independent
+audits and standalone validation with matching saved numeric overrides. The
+smallest inter-residue S-S distance across the main matrix is 2.789399 A, above
+the 2.786177 A limit; no inter-residue covalent-floor violation is reported.
+Outputs remain `uncalibrated` (exit 2), not scientifically calibrated structures.
+Runs used three workers on a four-core quota with one BLAS thread per process;
+brief diagnostic overlap reached four processes. Timings include that workload.
 
 For revision-04 benchmarks, give the push budget time to finish:
 
@@ -558,7 +609,7 @@ out of its assigned bin (`anchor_bin` rejection); crossing selection also filter
 such proposals. No spring acts in trial profile pushes.
 
 The default `off` and S-free paths preserve v0.1.6 initialization coordinates and
-RNG draws. A summary warns about multi-S residues, where only the first S is
+RNG draws. The stricter v0.1.8 distance constraints can change subsequent repair. A summary warns about multi-S residues, where only the first S is
 anchored. `search.sulfur_placement` records spacing conflicts, target shells,
 nonzero spring updates, bin rejections, profile errors and anchor-bin retention.
 `repair_history` contains one scalar summary per progress interval: top five
