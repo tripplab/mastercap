@@ -138,7 +138,8 @@ def resolve_limit_overrides(overrides=None):
 def apply_limit_overrides(limits, grouped, overrides=None, neighbor_samples=None):
     result, records = limits.copy(), []
     specs = resolve_limit_overrides(overrides)
-    excluded = {tuple(spec.split('=')[0].split('-')) for spec in specs}
+    # Explicit reference mode retains a measured pair, so it remains evidence.
+    excluded = {tuple(spec.split('=')[0].split('-')) for spec in specs if spec.split('=')[1] != 'reference'}
     measured = neighbor_samples or {}
     ratios = {}
     for pair, limit in sorted(limits.items()):

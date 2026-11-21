@@ -515,6 +515,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     anchor_updates = 0
     anchor_nonzero_updates = 0
     repair_history = []
+    consolidation_anchor_rejections = 0
     anchor_force_sum = anchor_force_max = 0.0
     if mode == "residue":
         check = local_geometry(structure, analysis.limits, margin, mode, metadata=metadata)
@@ -576,7 +577,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             initial_metrics = {"total_profile_error": metrics["total_profile_error"], "elements": metrics["elements"]}
             sulfur_initial_error = metrics["elements"].get("S", {}).get("profile_error")
         summary = error_summary(metrics)
-        if first_feasible is None and (iteration % progress_interval == 0 or geometry['mandatory_pass']):
+        if (first_feasible is None or phase == 'repair') and (iteration % progress_interval == 0 or geometry['mandatory_pass']):
             _, outside_interval = anchors.spring(candidate.xyz, center, edges, sulfur_anchor_tolerance)
             repair_history.append(repair_diagnostics(candidate, local, metadata, anchors, iteration, outside_interval))
         rolled_back = controller.observe(iteration, geometry, structure.xyz,
@@ -729,6 +730,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             update_positions(trial, consolidation_force, groups, mode)
             accepted, checked = accept_trial(candidate.xyz, trial.xyz, local, metadata, center, edges,
                                              margin, mode, refine_slack/2, selected_indices=selected, anchor_bins=anchor_bins)
+            consolidation_anchor_rejections += checked['undone_by_reason']['anchor_bin']
             structure.xyz[:] = accepted
             consolidation_steps += 1
             consolidation_iterations_total += 1
@@ -912,7 +914,9 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     report["sulfur_placement"] = {**anchors.summary, "profile_error_initial": sulfur_initial_error,
         'anchor_tolerance_angstrom':sulfur_anchor_tolerance, 'anchor_spring_enabled':sulfur_anchor_spring,
         'repair_anchor_nonzero_updates':int(anchor_nonzero_updates),
-        'anchor_bin_rejections':sum(p.get('undone_by_reason',{}).get('anchor_bin',0) for p in push_history),
+        'outside_interval_history':[{'iteration':r['iteration'],'count':r['anchored_sulfur_outside_interval']} for r in repair_history],
+        'anchor_bin_rejections_consolidation':consolidation_anchor_rejections,
+        'anchor_bin_rejections':consolidation_anchor_rejections+sum(p.get('undone_by_reason',{}).get('anchor_bin',0) for p in push_history),
         'anchor_bin_selection_rejections':sum(e.get('anchor_bin_selection_rejections',0) for p in push_history for e in p.get('per_element',{}).values()),
         "profile_error_first_feasible": sulfur_first_error,
         "profile_error_final": report["metrics"]["elements"].get("S", {}).get("profile_error"),

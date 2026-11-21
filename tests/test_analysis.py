@@ -184,3 +184,12 @@ def test_validate_old_steric_record_uses_numeric_value(tmp_path,capsys):
     assert result['distance_limits']['S-S'] == 1.371
     assert result['distance_limit_overrides'] == saved['analysis']['distance_limit_overrides']
     assert 'Saved S-S override 1.371 A predates the covalent floor' in capsys.readouterr().err
+
+
+def test_reference_mode_pair_remains_measured_steric_evidence():
+    limits={('C','S'):2.709,('N','S'):3.080,('S','S'):14.068}
+    measured={'-'.join(pair):{'grouped_fallback':False} for pair in limits}
+    resolved,records=apply_limit_overrides(limits,.4,['C-S=reference'],measured)
+    sulfur=next(r for r in records if r['pair']=='S-S')
+    assert sulfur['source_pair']=='C-S'
+    assert resolved['S','S']==pytest.approx(2.709/3.5*3.6)
