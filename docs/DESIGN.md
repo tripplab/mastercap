@@ -110,6 +110,15 @@ expanded to complete residues in rigid mode. Actual moving/retained atoms are
 reported separately. Rounded zero-move trials count toward budget/patience; rejected proposals
 also consume a push. A private snapshot provides a validation safety net.
 
+The revision-02 three-seed matrix improves total error beyond the seed spread
+and completes all 50 default pushes with 83-87% global acceptance, but its full
+scientific gate remains false. Seed 42 S has 52 crossing proposals and zero
+actual crossings, with only 33.4% sulfur acceptance and predominantly lower-bound
+rejections. A separate feasible-checkpoint probe at 0.05 A slack also leaves S
+unchanged. These traces identify locally blocked rare-element motion; they do
+not justify declaring sulfur convergence from aggregate acceptance or lowering
+the prescribed validation constraints. See `revision02` in the benchmark JSON.
+
 The optional rollback path retains a snapshot and its ranking key. More than
 0.05*N distance violations, at least 5000 components, or failure to recover
 within 10 repair updates restores it; thresholds are configurable. Smaller

@@ -356,6 +356,32 @@ Final v0.1.6 comparisons use seeds 42, 7 and 2026. For the same-code compatibili
 case, add `--refine-selection mismatch --refine-strength-control acceptance
 --neighbor-forces scaled --reconsolidate-below 0 --reconsolidate-every 0`.
 
+The complete 1CWP runs used the same 600 s budget and 4 A unsmoothed bins:
+
+| Seed | Default total error | Compatibility total error | Default acceptance | Compatibility acceptance |
+|---|---:|---:|---:|---:|
+| 42 | 0.051604 | 0.060651 | 83.0% | 57.2% |
+| 7 | 0.053973 | 0.063915 | 84.8% | 53.2% |
+| 2026 | 0.049935 | 0.059728 | 86.8% | 54.0% |
+
+All default runs finished 50 pushes within 600 s, with no rollbacks and passing
+independent PDB validation. Their total-error spread is 0.00404; each run's
+improvement below 0.0609 exceeds that spread. **The full scientific benchmark
+gate does not pass:** seed 42 S error remains 0.837037. Its 52 crossing proposals
+produced no sulfur bin crossings; only 33.4% of S proposals were accepted, with
+minimum-distance rejections dominant. C improved for every seed, and S improved
+for seeds 7 and 2026. Global acceptance alone therefore does not establish good
+refinement for a rare element. Full per-push evidence and explicit pass/fail
+checks are in the benchmark JSON. Runs used three workers on a four-core quota
+with BLAS threads limited to one; reported search time includes that environment.
+
+A separate matched-checkpoint probe raised `--refine-slack` to 0.05 A after the
+same first-feasible seed-42 state. Its 50 pushes reached total error 0.049767,
+but S still had zero bin crossings and error 0.837037. S acceptance rose only to
+40.3%. This probe skips initial repair and is explicitly not another full CLI
+benchmark; it does not establish that a larger global slack resolves the local
+sulfur blockage. The scientific gate remains open.
+
 With `--refine-acceptance rollback`, a full coordinate snapshot is saved before
 each push, including rigid residues. Damage below the configured disaster limits
 gets up to `--refine-recovery-limit` repair updates. Recovery is compared against
