@@ -103,3 +103,77 @@ def profile_png(edges, original, smoothed, generated=None, *, smoothing_enabled=
     stream = io.BytesIO()
     figure.savefig(stream, format="png", dpi=150)
     return stream.getvalue()
+
+
+CALIBRATION_COLUMNS=['source','label','element','n_atoms','mean','sd','p05','p50','p95',
+                     'min','max','multiple_of_counting','multiple_of_orientation','gap_closed','suggested_tolerance']
+
+
+def calibration_csv(calibration):
+    stream=io.StringIO(newline='')
+    writer=csv.DictWriter(stream,fieldnames=CALIBRATION_COLUMNS)
+    writer.writeheader()
+    names=sorted(calibration['element_counts'])+['Total']
+    def row(source,label,e,values):
+        n=sum(calibration['element_counts'].values()) if e=='Total' else calibration['element_counts'][e]
+        return {'source':source,'label':label,'element':e,'n_atoms':n,**values}
+    for source,values in calibration['levels'].items():
+        for e in names:
+            stats={'mean':values[e]['mean']} if source=='self' else values[e]
+            record=row(source,'',e,stats)
+            if source==calibration['suggested']['basis'] and e!='Total':
+                record['suggested_tolerance']=calibration['suggested']['profile_tolerance'][e]
+            writer.writerow(record)
+    for sample in calibration['compare']:
+        for e in names:
+            # CSV real variation uses normalized shape; JSON also retains raw errors.
+            record=row('compare',Path(sample['file']).name,e,{'mean':sample['shape'][e]})
+            record['n_atoms']=sum(sample['element_counts'].values()) if e=='Total' else sample['element_counts'][e]
+            writer.writerow(record)
+    for sample in calibration['generated']:
+        for e in names:
+            record=row('generated',Path(sample['file']).name,e,{'mean':sample['errors'][e],
+                 'multiple_of_counting':sample['multiples_counting'][e],
+                 'multiple_of_orientation':sample['multiples_orientation'][e],'gap_closed':sample['gap_closed'][e]})
+            record['n_atoms']=sum(sample['element_counts'].values()) if e=='Total' else sample['element_counts'][e]
+            writer.writerow(record)
+    return stream.getvalue().encode()
+
+
+def calibration_png(calibration):
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    names=sorted(calibration['element_counts'])+['Total']
+    figure=Figure(figsize=(9,1.8*len(names)+.6),layout='constrained')
+    FigureCanvasAgg(figure)
+    axes=np.atleast_1d(figure.subplots(len(names),1))
+    settings=calibration['settings']
+    figure.suptitle(f"{settings['reference_filename']} | bins <= {settings['bin_width']:g} A | "
+                   f"sigma {settings['smoothing_sigma']:g} A | {settings['replicates']} replicates")
+    for axis,e in zip(axes,names):
+        values=[calibration['levels'][level][e][k] for level in ('counting','orientation','placement') for k in ('p05','p95','mean')]
+        values += [s['shape'][e] for s in calibration['compare']]+[s['errors'][e] for s in calibration['generated']]
+        tolerance=calibration['suggested']['profile_tolerance'].get(e)
+        positive=[v for v in values+([tolerance] if tolerance is not None else []) if v>0]
+        zero=max(min(positive)/10,1e-12) if positive else 1e-6
+        def plot_value(v):return max(v,zero)
+        for k,level in enumerate(('counting','orientation','placement')):
+            stats=calibration['levels'][level][e]
+            axis.plot([plot_value(stats['p05']),plot_value(stats['p95'])],[k,k],linewidth=5,color=f'C{k}',solid_capstyle='round')
+            axis.plot(plot_value(stats['mean']),k,'o',color=f'C{k}')
+        for sample in calibration['compare']:
+            axis.plot(plot_value(sample['shape'][e]),3,marker='D',markerfacecolor='none',color='C3')
+        generated=calibration['generated']
+        for sample in generated:
+            value=plot_value(sample['errors'][e]);axis.plot(value,4,'^',color='C4')
+            if len(generated)<=5:axis.annotate(Path(sample['file']).stem,(value,4),xytext=(3,3),textcoords='offset points',fontsize=7,rotation=15)
+        if len(generated)>5:axis.plot([],[],'^',color='C4',label='Generated structures')
+        if tolerance is not None:
+            axis.axvline(plot_value(tolerance),linestyle='--',color='black',label=f'Tolerance {tolerance:.3g}')
+        axis.set(xscale='log',title=e,xlabel='Normalized integrated profile error',
+                 yticks=range(5),yticklabels=['Counting','Orientation','Placement','Real variation (shape)','Generated'],ylim=(-.6,4.9))
+        if any(v<=0 for v in values) or tolerance==0:
+            axis.text(.99,.98,f'Zero values shown at {zero:.1g}',transform=axis.transAxes,ha='right',va='top',fontsize=7)
+        if axis.get_legend_handles_labels()[0]:axis.legend(fontsize=7,loc='best')
+    stream=io.BytesIO();figure.savefig(stream,format='png',dpi=150)
+    return stream.getvalue()

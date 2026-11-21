@@ -176,7 +176,7 @@ def apply_limit_overrides(limits, grouped, overrides=None, neighbor_samples=None
 
 def analyze(structure, width=1.0, sigma=1.0, radius_method="extrema", percentiles=(0.5, 99.5),
             distance_percentile=1.0, min_samples=100, progress=None, pair_limit_overrides=None,
-            saved_limit_overrides=None):
+            saved_limit_overrides=None, compute_distances=True):
     if not np.isfinite([width, sigma]).all() or width <= 0 or sigma < 0:
         raise MastercapError("Bin width must be positive and smoothing sigma nonnegative")
     if progress:
@@ -202,10 +202,12 @@ def analyze(structure, width=1.0, sigma=1.0, radius_method="extrema", percentile
     for e, profile in original.items():
         filtered = gaussian_filter1d(profile, sigma / np.diff(edges)[0], mode="reflect") if sigma else profile.copy()
         smooth[e] = filtered * (np.sum(profile * volume) / np.sum(filtered * volume))
-    if progress:
+    if progress and compute_distances:
         progress("Estimating element-pair nearest-neighbor distance limits")
-    limits, samples, grouped = distance_statistics(selected, distance_percentile, min_samples)
-    if saved_limit_overrides is None:
+    limits, samples, grouped = distance_statistics(selected, distance_percentile, min_samples) if compute_distances else ({}, {}, None)
+    if not compute_distances:
+        override_records = []
+    elif saved_limit_overrides is None:
         limits, override_records = apply_limit_overrides(limits, grouped, pair_limit_overrides, samples)
     else:
         # Saved numeric values are authoritative, including pre-floor reports.

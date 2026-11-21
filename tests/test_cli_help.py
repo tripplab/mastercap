@@ -50,7 +50,7 @@ def test_root_help_lists_all_commands_options_descriptions_and_defaults(capsys, 
     assert "default: None" not in output
 
 
-@pytest.mark.parametrize("command", ["analyze", "generate", "validate"])
+@pytest.mark.parametrize("command", ["analyze", "generate", "validate", "calibrate"])
 def test_command_help_is_focused_and_complete(command, capsys):
     with pytest.raises(SystemExit) as stopped:
         main([command, "--help"])
@@ -69,10 +69,10 @@ def test_command_help_is_focused_and_complete(command, capsys):
         assert "--time-limit" in output and "--allow-approximate" in output
     elif command == "validate":
         assert "--report" in output and "--pdb" in output
-        assert "--profile-tolerance" not in output
+        assert "--profile-tolerance" in output and "--tolerances-from" in output
 
 
-@pytest.mark.parametrize("command", ["analyze", "generate", "validate"])
+@pytest.mark.parametrize("command", ["analyze", "generate", "validate", "calibrate"])
 def test_documented_help_examples_parse_without_execution(command):
     for line in COMMAND_EXAMPLES[command].splitlines():
         if line.strip().startswith("mastercap "):
@@ -92,7 +92,7 @@ def test_help_displays_changed_parser_defaults_instead_of_static_copies():
 def test_version_matches_project_metadata_and_cli(capsys):
     root = Path(__file__).resolve().parents[1]
     metadata = tomllib.loads((root/"pyproject.toml").read_text())
-    assert __version__ == metadata["project"]["version"] == "0.1.8"
+    assert __version__ == metadata["project"]["version"] == "0.1.9"
     assert f"**Current version: {__version__}**" in (root/"README.md").read_text()
     with pytest.raises(SystemExit) as stopped:
         main(["--version"])
