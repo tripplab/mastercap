@@ -56,7 +56,7 @@ class CompleteHelpParser(argparse.ArgumentParser):
         text = super().format_help()
         for command in self.command_parsers:
             text += "\n"+"="*72+"\n"+command.format_help()
-        return text
+        return f"mastercap {__version__}\n\n"+text
 
 
 COMMAND_EXAMPLES = {
@@ -636,6 +636,7 @@ def main(argv=None):
     args = parser().parse_args(argv)
     logging.basicConfig(level=logging.ERROR if args.quiet else logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s: %(message)s", force=True)
+    LOG.info("mastercap %s", __version__)
     try:
         return run(args)
     except (MastercapError, OSError, ValueError, KeyError, IndexError, EOFError, TypeError) as exc:

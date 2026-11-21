@@ -29,6 +29,7 @@ def test_root_help_lists_all_commands_options_descriptions_and_defaults(capsys, 
     assert stopped.value.code == 0
     captured = capsys.readouterr()
     assert not captured.err
+    assert captured.out.startswith(f"mastercap {__version__}\n\n")
     output = normalized(captured.out)
     reference = parser()
     for command in reference.command_parsers:
@@ -55,6 +56,7 @@ def test_command_help_is_focused_and_complete(command, capsys):
         main([command, "--help"])
     assert stopped.value.code == 0
     output = capsys.readouterr().out
+    assert output.startswith(f"mastercap {__version__}\n\n")
     assert f"usage: mastercap {command}" in output
     assert "Examples:" in output
     assert "Exit codes:" in output
@@ -88,8 +90,10 @@ def test_help_displays_changed_parser_defaults_instead_of_static_copies():
 
 
 def test_version_matches_project_metadata_and_cli(capsys):
-    metadata = tomllib.loads((Path(__file__).resolve().parents[1]/"pyproject.toml").read_text())
+    root = Path(__file__).resolve().parents[1]
+    metadata = tomllib.loads((root/"pyproject.toml").read_text())
     assert __version__ == metadata["project"]["version"] == "0.1.6"
+    assert f"**Current version: {__version__}**" in (root/"README.md").read_text()
     with pytest.raises(SystemExit) as stopped:
         main(["--version"])
     assert stopped.value.code == 0
