@@ -124,3 +124,57 @@ def test_profile_retains_each_seeded_residue_rotation():
                            'independent','regular',sulfur_residue_placement=mode)
         outputs.append([t['rotation'] for t in trace])
     assert np.array_equal(*outputs)
+
+
+def test_dead_zone_spring_and_reference_radii():
+    from mastercap.generate import SulfurAnchors
+    anchors=SulfurAnchors(np.array([0,1]),np.array([12.,12.]))
+    edges=np.array([6.,10.,14.,18.])
+    force,count=anchors.spring(np.array([[12.5,0,0],[13.8,0,0]]),np.zeros(3),edges,1.5)
+    assert np.array_equal(force[0],np.zeros(3))
+    assert force[1,0] < 0 and count == 1
+    low,high=anchors.intervals(edges,100)
+    assert np.allclose(low,10.25) and np.allclose(high,13.75)
+    source,edges,profiles,center=placement_case()
+    source.atoms=[Atom(a.name,a.element,a.resname,a.residue,{'reference_atom_index':i}) for i,a in enumerate(source.atoms)]
+    reference=source.copy(); analysis=SimpleNamespace(structure=reference,center=center,limits={('S','S'):2.8})
+    anchors=SulfurAnchors()
+    initialize(source,analysis,edges,profiles,center,np.random.default_rng(42),'independent','regular',
+               sulfur_residue_placement='reference',sulfur_anchors=anchors)
+    expected=np.linalg.norm(reference.xyz[anchors.indices]-center,axis=1)
+    assert np.allclose(anchors.radii,expected,atol=1e-6,rtol=0)
+    assert np.allclose(np.linalg.norm(source.xyz[anchors.indices]-center,axis=1),expected,atol=1e-6,rtol=0)
+
+
+def test_direction_spacing_is_bounded_and_reproducible():
+    from mastercap.generate import space_sulfur_directions
+    original=np.array([[1.,0,0],[1.,.001,0],[-1.,0,0]])
+    outputs=[]
+    for _ in range(2):
+        directions=original.copy()
+        before,after,swaps=space_sulfur_directions(directions,np.array([0,1]),np.array([12.,12.]),np.array([2]),np.random.default_rng(42),4.8)
+        assert len(before)==1 and len(after)==0 and swaps==1
+        outputs.append(directions)
+    assert np.array_equal(*outputs)
+    before,after,swaps=space_sulfur_directions(original.copy(),np.array([0,1]),np.array([12.,12.]),np.array([],int),np.random.default_rng(42),4.8)
+    assert len(after)==1 and swaps==0
+
+
+def test_anchor_bin_trial_rejection_and_repair_diagnostics():
+    from mastercap.constraints import GeometryMetadata,local_geometry
+    from mastercap.refinement import accept_trial
+    from mastercap.generate import repair_diagnostics
+    structure=Structure([Atom('SG','S','CYS',0),Atom('C','C','ALA',1)],np.array([[11.99,0,0],[13.5,0,0]]))
+    limits={('C','S'):1.0}
+    metadata=GeometryMetadata.build(structure,limits)
+    local=local_geometry(structure,limits,metadata=metadata)
+    trial=structure.xyz.copy();trial[0,0]=12.01
+    accepted,report=accept_trial(structure.xyz,trial,local,metadata,structure.xyz.mean(axis=0),np.array([0.,.75,20.]),
+                                anchor_bins=(np.array([0]),np.array([1])))
+    assert np.array_equal(accepted,structure.xyz)
+    assert report['undone_by_reason']['anchor_bin']==1
+    local['disconnected_residues']=[0]
+    anchors=SulfurAnchors(np.array([0]),np.array([11.99]))
+    diagnostics=repair_diagnostics(structure,local,metadata,anchors,0,0)
+    assert diagnostics['disconnected_by_residue_name']=={'CYS':1}
+    assert diagnostics['anchored_disconnected_residues']==1

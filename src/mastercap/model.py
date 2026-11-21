@@ -12,6 +12,19 @@ class MastercapError(ValueError):
 VDW = {"H": 1.20, "C": 1.70, "N": 1.55, "O": 1.52, "F": 1.47,
        "P": 1.80, "S": 1.80, "CL": 1.75, "SE": 1.90, "BR": 1.85,
        "I": 1.98}
+# Pyykko and Atsumi single-bond covalent radii, Chem. Eur. J. 15 (2009), 186.
+COVALENT = {"H": .32, "C": .75, "N": .71, "O": .63, "F": .64,
+            "P": 1.11, "S": 1.03, "CL": .99, "SE": 1.16, "BR": 1.14, "I": 1.33}
+
+
+def covalent_floor(a, b):
+    return .9*(COVALENT[a]+COVALENT[b])
+
+
+def guard_override(pair, value):
+    floor = covalent_floor(*pair)
+    if value < floor:
+        raise MastercapError(f"{'-'.join(pair)} override {value:.3f} A is below the covalent floor {floor:.2f} A")
 PROTEIN = set("ALA ARG ASN ASP CYS GLN GLU GLY HIS ILE LEU LYS MET PHE PRO SER THR TRP TYR VAL SEC PYL ASX GLX HID HIE HIP CYX MSE HYP".split())
 
 

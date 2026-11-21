@@ -104,7 +104,7 @@ def test_validation_plot_honors_no_smoothing_in_legacy_report(tmp_path, small_pd
                   "rollback_component_limit", "refine_strength_control", "refine_min_step",
                   "consolidate_target", "reconsolidate_below", "reconsolidate_every",
                   "reconsolidate_iterations", "refine_selection", "pair_limit_override",
-                  "sulfur_residue_placement", "consolidate_noncontact_slack"):
+                  "sulfur_residue_placement", "consolidate_noncontact_slack", "sulfur_anchor_tolerance", "no_sulfur_anchor_spring"):
         report["configuration"].pop(field)
     report_path.write_text(json.dumps(report))
     settings = []
@@ -156,7 +156,7 @@ def test_stage_messages_precede_warning_and_show_refinement(tmp_path, small_pdb,
     ("--reconsolidate-below", "-1"), ("--reconsolidate-below", "1.1"),
     ("--reconsolidate-every", "-1"), ("--reconsolidate-iterations", "-1"),
     ("--refine-strength-control", "invalid"), ("--refine-selection", "invalid"),
-    ("--sulfur-residue-placement", "invalid"), ("--consolidate-noncontact-slack", "invalid"),
+    ("--sulfur-residue-placement", "invalid"), ("--sulfur-anchor-tolerance", "-1"), ("--sulfur-anchor-tolerance", "nan"), ("--consolidate-noncontact-slack", "invalid"),
     ("--pair-limit-override", "S-S=nan")])
 def test_invalid_progress_and_refinement_fail_before_input(option, value, capsys):
     with pytest.raises(SystemExit) as stopped:

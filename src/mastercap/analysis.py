@@ -4,7 +4,7 @@ from itertools import combinations_with_replacement
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.spatial import cKDTree
-from .model import MastercapError, VDW
+from .model import MastercapError, VDW, guard_override
 
 
 @dataclass
@@ -110,14 +110,17 @@ def parse_limit_override(spec):
         if len(names) != 2 or any(name not in VDW for name in names):
             raise ValueError
         value = value.lower()
-        if value not in ("steric", "reference"):
+        if value not in ("steric", "pooled", "reference"):
             number = float(value)
             if not np.isfinite(number) or number <= 0:
                 raise ValueError
+            guard_override(tuple(sorted(names)), number)
             value = str(number)
         return "-".join(sorted(names))+"="+value
+    except MastercapError:
+        raise
     except (ValueError, AttributeError):
-        raise MastercapError(f"Invalid pair-limit override {spec!r}; use ELEMENT-ELEMENT=positive_A|steric|reference") from None
+        raise MastercapError(f"Invalid pair-limit override {spec!r}; use ELEMENT-ELEMENT=positive_A|steric|pooled|reference") from None
 
 
 def resolve_limit_overrides(overrides=None):
@@ -132,25 +135,48 @@ def resolve_limit_overrides(overrides=None):
     return [f"{pair}={value}" for pair, value in sorted(resolved.items())]
 
 
-def apply_limit_overrides(limits, grouped, overrides=None):
+def apply_limit_overrides(limits, grouped, overrides=None, neighbor_samples=None):
     result, records = limits.copy(), []
-    for spec in resolve_limit_overrides(overrides):
+    specs = resolve_limit_overrides(overrides)
+    # Explicit reference mode retains a measured pair, so it remains evidence.
+    excluded = {tuple(spec.split('=')[0].split('-')) for spec in specs if spec.split('=')[1] != 'reference'}
+    measured = neighbor_samples or {}
+    ratios = {}
+    for pair, limit in sorted(limits.items()):
+        if pair in excluded or measured.get('-'.join(pair), {}).get('grouped_fallback', True):
+            continue
+        ratio = limit/sum(VDW[e] for e in pair)
+        for element in pair:
+            if element not in ratios or ratio < ratios[element][0]:
+                ratios[element] = ratio, '-'.join(pair)
+    for spec in specs:
         pair, value = spec.split("=")
         key = tuple(pair.split("-"))
         if key not in limits:
             continue
-        mode = value if value in ("steric", "reference") else "number"
-        new = (grouped*sum(VDW[e] for e in key) if mode == "steric" else
+        mode = value if value in ("steric", "pooled", "reference") else "number"
+        source = {}
+        if mode == 'steric':
+            missing = sorted({e for e in key if e not in ratios})
+            if missing:
+                raise MastercapError(f"No measured non-overridden pair for {', '.join(missing)} in {pair}; provide a numeric pair-limit override")
+            candidates = [ratios[e] for e in key if e in ratios]
+            ratio, source_pair = min(candidates)
+            source = {'ratio': ratio, 'source_pair': source_pair}
+        new = (ratio*sum(VDW[e] for e in key) if mode == 'steric' else
+               grouped*sum(VDW[e] for e in key) if mode == "pooled" else
                limits[key] if mode == "reference" else float(value))
+        guard_override(key, new)
         result[key] = float(new)
-        records.append({"pair": pair, "original_value": limits[key], "new_value": float(new), "mode": mode,
+        records.append({"pair": pair, "original_value": limits[key], "new_value": float(new), "mode": mode, **source,
                         "reason": "statistical spacing, not a steric limit" if pair == "S-S" and mode == "steric"
                         else "user-selected distance limit"})
     return result, records
 
 
 def analyze(structure, width=1.0, sigma=1.0, radius_method="extrema", percentiles=(0.5, 99.5),
-            distance_percentile=1.0, min_samples=100, progress=None, pair_limit_overrides=None):
+            distance_percentile=1.0, min_samples=100, progress=None, pair_limit_overrides=None,
+            saved_limit_overrides=None):
     if not np.isfinite([width, sigma]).all() or width <= 0 or sigma < 0:
         raise MastercapError("Bin width must be positive and smoothing sigma nonnegative")
     if progress:
@@ -179,7 +205,19 @@ def analyze(structure, width=1.0, sigma=1.0, radius_method="extrema", percentile
     if progress:
         progress("Estimating element-pair nearest-neighbor distance limits")
     limits, samples, grouped = distance_statistics(selected, distance_percentile, min_samples)
-    limits, override_records = apply_limit_overrides(limits, grouped, pair_limit_overrides)
+    if saved_limit_overrides is None:
+        limits, override_records = apply_limit_overrides(limits, grouped, pair_limit_overrides, samples)
+    else:
+        # Saved numeric values are authoritative, including pre-floor reports.
+        override_records = saved_limit_overrides
+        seen = set()
+        for entry in override_records:
+            key = tuple(entry['pair'].split('-'))
+            value = entry['new_value']
+            if key not in limits or key in seen or not np.isfinite(value) or value <= 0:
+                raise MastercapError('Invalid saved distance-limit override record')
+            seen.add(key)
+            limits[key] = float(value)
     if progress:
         for entry in override_records:
             progress(f"Distance limit override: {entry['pair']} {entry['original_value']:.3f} -> "

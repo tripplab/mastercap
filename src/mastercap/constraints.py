@@ -5,7 +5,7 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 from .analysis import histogram, shell_volumes
-from .model import MastercapError
+from .model import MastercapError, covalent_floor
 
 
 @dataclass
@@ -22,9 +22,10 @@ class GeometryMetadata:
     lower_matrix: np.ndarray
     element_indices: dict
     groups: dict
+    inter_residue_floor: np.ndarray | None = None
 
     @classmethod
-    def build(cls, structure, limits):
+    def build(cls, structure, limits, *, enforce_covalent_floor=False):
         elements, radii, residues = structure.elements, structure.radii, structure.residues
         names, codes = np.unique(elements, return_inverse=True)
         lookup = {str(e): i for i, e in enumerate(names)}
@@ -35,8 +36,17 @@ class GeometryMetadata:
         order = np.argsort(residues, kind="stable")
         blocks = np.split(order, np.flatnonzero(np.diff(residues[order]))+1)
         groups = {int(residues[g[0]]): g for g in blocks if len(g)}
+        floor = np.array([[covalent_floor(a,b) for b in names] for a in names]) if enforce_covalent_floor else None
         return cls(elements, radii, residues, codes, matrix,
-                   {str(e): np.flatnonzero(elements == e) for e in names}, groups)
+                   {str(e): np.flatnonzero(elements == e) for e in names}, groups, floor)
+
+    def pair_lower_bounds(self, pairs):
+        lower = self.lower_matrix[self.codes[pairs[:,0]],self.codes[pairs[:,1]]]
+        if self.inter_residue_floor is not None:
+            internal = self.residues[pairs[:,0]] == self.residues[pairs[:,1]]
+            floor = self.inter_residue_floor[self.codes[pairs[:,0]],self.codes[pairs[:,1]]]
+            lower = np.where(internal,lower,np.maximum(lower,floor))
+        return lower
 
 
 def components(n, edges):
@@ -145,7 +155,7 @@ def local_geometry(structure, limits, margin=0.0, mode="independent", *, metadat
     if not len(pairs):
         pairs = np.empty((0, 2), dtype=int)
     distances = np.linalg.norm(xyz[pairs[:, 0]] - xyz[pairs[:, 1]], axis=1)
-    lower = metadata.lower_matrix[metadata.codes[pairs[:, 0]], metadata.codes[pairs[:, 1]]]
+    lower = metadata.pair_lower_bounds(pairs)
     internal = residues[pairs[:, 0]] == residues[pairs[:, 1]]
     violation = distances < lower - 1e-9
     exemptions = violation & internal if mode == "residue" else np.zeros(len(pairs), dtype=bool)
@@ -221,3 +231,89 @@ def acceptance(geometry, metrics, profile_tolerance, composition_tolerance):
                     abs(m["count_difference"]) <= max(1.0, composition_tolerance * m["target_count"])
                     for m in metrics["elements"].values())
     return "valid" if soft_pass else "approximate"
+
+
+def pair_distance_audit(structure, limits):
+    """Independent inter-residue minima and distance counts, using fresh trees."""
+    from itertools import combinations_with_replacement
+    from .model import covalent_floor
+    xyz, residues = structure.xyz, structure.residues
+    elements = structure.elements
+    groups = {e: np.flatnonzero(elements == e) for e in sorted(set(elements))}
+    trees = {e: cKDTree(xyz[ix]) for e, ix in groups.items()}
+
+    def identity(i):
+        atom = structure.atoms[int(i)]
+        return {'index': int(i), 'serial': atom.origin.get('serial'), 'atom_name': atom.name,
+                'residue_name': atom.resname, 'residue_number': atom.origin.get('residue_number', atom.residue+1),
+                'residue_index': atom.residue, 'chain': atom.origin.get('chain', ''),
+                'segment': atom.origin.get('segment', 0), 'element': atom.element}
+
+    def peptide(i, j):
+        a, b = structure.atoms[int(i)], structure.atoms[int(j)]
+        if a.name == 'N' and b.name == 'C':
+            a, b = b, a
+        if (a.name, a.element, b.name, b.element) != ('C', 'C', 'N', 'N'):
+            return False
+        if not a.origin.get('chain') or any(a.origin.get(k) != b.origin.get(k) for k in ('chain','segment','model')):
+            return False
+        try:
+            return int(b.origin['residue_number']) == int(a.origin['residue_number'])+1
+        except (KeyError, ValueError, TypeError):
+            return False
+
+    report = {'pairs': {}, 'below_limit_count': 0, 'below_covalent_floor_count': 0, 'passed': True}
+    for a, b in combinations_with_replacement(groups, 2):
+        ai, bi = groups[a], groups[b]
+        best_distance, best_pair = float('inf'), None
+        pending, k = np.arange(len(ai)), min(2, len(bi))
+        while len(pending):
+            distances, neighbors = trees[b].query(xyz[ai[pending]], k=list(range(1,k+1)))
+            eligible = residues[ai[pending], None] != residues[bi[neighbors]]
+            values = np.where(eligible, distances, np.inf)
+            position = np.unravel_index(np.argmin(values), values.shape)
+            if values[position] < best_distance:
+                best_distance = float(values[position])
+                best_pair = (int(ai[pending[position[0]]]), int(bi[neighbors[position]]))
+            if k == len(bi):
+                break
+            pending = pending[~eligible.any(axis=1)]
+            k = min(len(bi), 2*k)
+        limit = limits.get((a,b), 0.0)
+        floor = covalent_floor(a,b)
+        near = trees[a].sparse_distance_matrix(trees[b], max(limit,floor), output_type='coo_matrix')
+        left, right = ai[near.row], bi[near.col]
+        keep = residues[left] != residues[right]
+        if a == b:
+            keep &= left < right
+        left, right, distances = left[keep], right[keep], near.data[keep]
+        low = distances < limit-1e-9
+        cov = distances < floor-1e-9
+        for index in np.flatnonzero(cov):
+            if peptide(left[index],right[index]):
+                cov[index] = False
+        examples = lambda mask: [{'distance_angstrom': float(distances[i]),
+                                 'atoms': [identity(left[i]), identity(right[i])]} for i in np.flatnonzero(mask)[:20]]
+        report['pairs'][a+'-'+b] = {
+            'minimum_distance_angstrom': best_distance if best_pair is not None else None,
+            'closest_atoms': [identity(i) for i in best_pair] if best_pair is not None else [],
+            'limit_angstrom': limit, 'covalent_floor_angstrom': floor,
+            'below_limit_count': int(low.sum()), 'below_covalent_floor_count': int(cov.sum()),
+            'below_limit_examples': examples(low), 'below_covalent_floor_examples': examples(cov)}
+        report['below_limit_count'] += int(low.sum())
+        report['below_covalent_floor_count'] += int(cov.sum())
+    report['passed'] = not (report['below_limit_count'] or report['below_covalent_floor_count'])
+    return report
+
+
+def require_pair_distance_audit(audit):
+    if audit['passed']:
+        return
+    for pair, record in audit['pairs'].items():
+        examples = record['below_covalent_floor_examples'] or record['below_limit_examples']
+        if examples:
+            sample = examples[0]
+            atoms = ' / '.join(f"serial {a['serial']} {a['atom_name']} {a['residue_name']} {a['chain']} {a['residue_number']} (index {a['index']})"
+                               for a in sample['atoms'])
+            cause = 'covalent floor' if record['below_covalent_floor_examples'] else 'distance limit'
+            raise MastercapError(f"Final pair distance audit failed: {pair} {sample['distance_angstrom']:.3f} A below {cause}; {atoms}")
