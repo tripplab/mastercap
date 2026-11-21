@@ -223,11 +223,17 @@ def profile_metrics(structure, center, edges, target, original=None, *, metadata
 
 
 def acceptance(geometry, metrics, profile_tolerance, composition_tolerance):
+    from .tolerances import check_coverage
+    tolerances = check_coverage(profile_tolerance, metrics.get('elements',{}))
+    for e, values in metrics.get('elements',{}).items():
+        tolerance = tolerances.get(e,tolerances.get('*')) if tolerances is not None else None
+        values['tolerance'] = tolerance
+        values['within_tolerance'] = bool((values['profile_error'] or 0)<=tolerance) if tolerance is not None else None
     if not geometry["mandatory_pass"]:
         return "failed"
     if profile_tolerance is None or composition_tolerance is None:
         return "uncalibrated"
-    soft_pass = all((m["profile_error"] or 0) <= profile_tolerance and
+    soft_pass = all(m['within_tolerance'] and
                     abs(m["count_difference"]) <= max(1.0, composition_tolerance * m["target_count"])
                     for m in metrics["elements"].values())
     return "valid" if soft_pass else "approximate"

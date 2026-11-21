@@ -1,6 +1,6 @@
 # mastercap
 
-**Current version: 0.1.8**
+**Current version: 0.1.9**
 
 Reference-driven generation of spherical geometric capsid particles in Python.
 Particles approximate the radial element density and residue composition of an
