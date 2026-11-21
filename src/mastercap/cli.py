@@ -106,7 +106,8 @@ Workflow and defaults:
   atom count, or 5000 components.
   Fourfold strength reduction without 25% damage reduction stops with
   refinement_blocked. Patience/strength floor stops use refinement_stalled.
-  --neighbor-forces scaled (default) follows strength and atom selection, with
+  --neighbor-forces off (default) disables statistical neighbor contributions.
+  scaled follows strength and atom selection, with
   an accumulated per-atom cap of half --refine-max-step; off disables these
   contributions; fixed uses coefficient 0.002 on all atoms without that cap.
   Both active modes guard targets inside the distance/contact window.
@@ -268,7 +269,7 @@ def parser():
             command.add_argument("--refine-max-step", type=finite_positive, default=0.05, help="Maximum absolute requested radial profile move per selected atom in A; excludes other forces and rigid projection")
             command.add_argument("--refine-fraction", type=positive_fraction, default=0.2, help="Fraction of atoms per element selected per push; prioritize largest radial mismatches, round count up; must be in (0, 1]")
             command.add_argument("--refine-recovery-limit", type=nonnegative_integer, default=10, help="Maximum repair updates after a damaging push before restoring its snapshot; 0 permits no repair updates")
-            command.add_argument("--neighbor-forces", choices=("scaled", "off", "fixed"), default="scaled", help="Refinement nearest-neighbor forces: scaled follows radial strength, selection and a half-step per-atom cap; off disables them; fixed keeps unscaled 0.002/all-atom behavior. Targets are guarded in both active modes")
+            command.add_argument("--neighbor-forces", choices=("scaled", "off", "fixed"), default="off", help="Refinement nearest-neighbor forces: off disables them (default); scaled follows radial strength, selection and a half-step per-atom cap; fixed keeps unscaled 0.002/all-atom behavior. Targets are guarded in both active modes")
             command.add_argument("--refine-slack", type=finite_nonnegative, default=0.02, help="Target distance/contact slack in A during consolidation and neighbor targeting; final validation limits are unchanged")
             command.add_argument("--consolidate-iterations", type=nonnegative_integer, default=10, help="Consolidation updates before refinement; 0 disables; at most 3 restarts after broken geometry")
             command.add_argument("--refine-acceptance", choices=("per-atom", "rollback"), default="per-atom", help="Per-atom rejects conflicting trial moves before commit (whole residues in rigid mode); rollback permits repair and snapshot recovery")
@@ -438,7 +439,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                  timings["preparation"], timings["search"], args.time_limit, search_report.get("termination", "preparation_error"))
         recoveries = [p["recovery_iterations"] for p in search_report.get("push_history", []) if p.get("recovery_iterations") is not None]
         LOG.info("Feasible iterations=%d; profile pushes=%d; acceptance=%s; committed pushes=%d; mean acceptance=%s; "
-                 "rollbacks=%d; restored snapshots=%d; recoveries improved/worse=%d/%d; stop limit=%s; median repair iterations=%s",
+                 "rollbacks=%d; restored snapshots=%d; recoveries improved/worse=%d/%d; stop limit=%s; stall cause=%s; median repair iterations=%s",
                  len(search_report.get("feasible_iterations", [])), len(search_report.get("push_history", [])),
                  search_report.get("acceptance_mode"), search_report.get("committed_pushes", 0),
                  (f"{search_report['mean_acceptance_fraction']:.1%}" if search_report.get("mean_acceptance_fraction") is not None else "not applicable"),
@@ -446,6 +447,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                  len(search_report.get("restored_snapshot_iterations", [])),
                  search_report.get("recoveries_improved", 0), search_report.get("recoveries_worse", 0),
                  search_report.get("refinement_stop_limit") or search_report.get("termination"),
+                 search_report.get("stall_cause") or "none",
                  f"{np.median(recoveries):g}" if search_report.get("repair_attempts", 0) else "0 attempted")
         if particle is None:
             raise MastercapError(f"Search ended ({search_report.get('termination', 'preparation_error')}) without a candidate satisfying every mandatory constraint")

@@ -35,7 +35,7 @@ def apply_radial_push(force, radial, direction, element_indices, targets,
     resulting combined move, not just this contribution. Return scalar move
     statistics and selected indices; indices remain private to the search.
     """
-    sizes, moves, selected = [], [], []
+    sizes, moves, selected, per_element = [], [], [], {}
     for element, target in targets.items():
         indices = element_indices[element]
         if not len(indices):
@@ -48,13 +48,14 @@ def apply_radial_push(force, radial, direction, element_indices, targets,
         force[order[chosen]] += requested[:, None]*direction[order[chosen]]
         selected.append(order[chosen])
         sizes.append(count)
+        per_element[element] = {"selected": count}
         moves.append(np.abs(requested))
     absolute = np.concatenate(moves) if moves else np.array([])
     details = {"strength": float(strength), "selected_atoms": sum(sizes),
             "atoms_pushed": int(np.count_nonzero(absolute)),
             "mean_requested_radial_move_angstrom": float(absolute.mean()) if len(absolute) else 0.0,
             "max_requested_radial_move_angstrom": float(absolute.max()) if len(absolute) else 0.0,
-            "fraction": float(fraction), "max_step_angstrom": float(max_step)}
+            "fraction": float(fraction), "max_step_angstrom": float(max_step), "per_element": per_element}
     return details, np.concatenate(selected) if selected else np.array([], dtype=int)
 
 
@@ -104,8 +105,56 @@ def force_summary(force):
     return {"mean_move_angstrom": float(lengths.mean()), "max_move_angstrom": float(lengths.max())}
 
 
+def radial_bins(radial, edges):
+    """Match numpy.histogram, including its closed rightmost bin."""
+    bins = np.searchsorted(edges, radial, side="right")-1
+    bins[radial == edges[-1]] = len(edges)-2
+    return bins
+
+
+def crossing_metrics(before, after, element_indices, edges, profiles):
+    from .analysis import shell_volumes
+    source, destination = radial_bins(before, edges), radial_bins(after, edges)
+    result = {}
+    n = len(edges)-1
+    for e, indices in element_indices.items():
+        a, b = source[indices], destination[indices]
+        counts = np.bincount(a[(a >= 0) & (a < n)], minlength=n).astype(float)
+        target = profiles[e]*shell_volumes(edges)
+        improved = worsened = neutral = 0
+        changed = (a != b) & (a >= 0) & (a < n) & (b >= 0) & (b < n)
+        for old, new in zip(a[changed], b[changed]):
+            error_before = abs(counts[old]-target[old])+abs(counts[new]-target[new])
+            counts[old] -= 1
+            counts[new] += 1
+            gain = error_before-abs(counts[old]-target[old])-abs(counts[new]-target[new])
+            improved += gain > 1e-9
+            worsened += gain < -1e-9
+            neutral += abs(gain) <= 1e-9
+        result[e] = {"bin_crossings": int(changed.sum()), "crossings_improved": int(improved),
+                     "crossings_worsened": int(worsened), "crossings_neutral": int(neutral)}
+    return result
+
+
+def finish_push_metrics(record, summary):
+    if summary is None or not record.get("profile_before"):
+        return
+    for e, after in summary["element_errors"].items():
+        record.setdefault("per_element", {}).setdefault(e, {})["profile_error_change"] = (
+            after-record["profile_before"]["element_errors"][e])
+
+
+def classify_stall(history, patience):
+    window = history[-patience:] if patience else history
+    if window and np.mean([p.get("actual_move", {}).get("mean_move_angstrom", 0) for p in window]) < 0.001:
+        return "moves_below_rounding"
+    if window and np.mean([p.get("acceptance_fraction", 1) for p in window]) < 0.3:
+        return "low_acceptance"
+    return "converged"
+
+
 def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
-                 mode="independent", max_step=0.05, selected_indices=None):
+                 mode="independent", max_step=0.05, selected_indices=None, return_undone=False):
     """Reject conflicting moved atoms/residues while retaining every old contact.
 
     Candidate pairs cover trial/trial AND trial/snapshot combinations, since
@@ -205,14 +254,21 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
     if safety_reverted_all or center_rejected:
         retained[:] = False
     count = int(proposals.sum())
-    return trial, {"atoms_proposed": count, "atoms_accepted": int(retained.sum()),
+    undone = proposals & ~retained
+    per_element = {e: {"accepted": int(retained[ix].sum()), "undone": int(undone[ix].sum()),
+                       "undone_too_close": int(reasons["too_close"][ix].sum()),
+                       "undone_contact_broken": int(reasons["contact_broken"][ix].sum())}
+                   for e, ix in metadata.element_indices.items()}
+    details = {"atoms_proposed": count, "atoms_accepted": int(retained.sum()),
                    "atoms_undone": int(count-retained.sum()), "atoms_moved": int(accepted.sum()),
                    "proposed_moving_atoms": int(proposed.sum()),
                    "stationary_proposals": int(np.count_nonzero(proposals & ~proposed)),
                    "undone_by_reason": {name: int(mask.sum()) for name, mask in reasons.items()},
                    "acceptance_fraction": float(retained.sum()/count) if count else 1.0,
                    "check_passes": passes, "expanded_undo_atoms": expanded,
-                   "safety_reverted_all": safety_reverted_all, "center_rejected": center_rejected}
+                   "safety_reverted_all": safety_reverted_all, "center_rejected": center_rejected,
+                   "per_element": per_element}
+    return (trial, details, undone) if return_undone else (trial, details)
 
 
 class AcceptanceController:
@@ -244,6 +300,7 @@ class AcceptanceController:
             return False
         record, snapshot = self.pending
         record.update({"damage": damage_summary(iteration, geometry), "profile_after": summary})
+        finish_push_metrics(record, summary)
         self.pending = None
         if geometry["mandatory_pass"]:
             record.update({"outcome": "accepted", "recovery_iterations": 0})
@@ -295,6 +352,8 @@ class PushController:
             return False
         record, snapshot, snapshot_key = self.pending
         record.setdefault("profile_after", summary)
+        if "damage" not in record:
+            finish_push_metrics(record, summary)
         recovery_age = iteration-record["iteration"]-1
         big = (geometry["distance_violations"] > self.violation_fraction*self.atom_count
                or geometry["global_components"] >= self.component_limit)
