@@ -650,8 +650,20 @@ def validate_command(args, source, started, names):
     LOG.info("Validating geometry, connectivity and radial profiles")
     geometry = validate_geometry(particle, center, edges, analysis.limits, config["overlap_margin"], saved["effective_mode"])
     audit_report = {}
-    final_connectivity_check(particle, config["overlap_margin"], geometry, audit_report)
-    final_pair_distance_check(particle, analysis.limits, audit_report)
+    try:
+        final_connectivity_check(particle, config["overlap_margin"], geometry, audit_report)
+        final_pair_distance_check(particle, analysis.limits, audit_report)
+    except MastercapError as exc:
+        failed = base_report(args, started)
+        failed.update(status='failed', error=str(exc), geometry=geometry, **audit_report,
+                      validated_pdb=str(args.pdb), reference=analysis.structure.provenance,
+                      warnings=analysis.warnings,
+                      distance_limits={'-'.join(pair):limit for pair,limit in analysis.limits.items()},
+                      distance_limit_overrides=analysis.distance_limit_overrides)
+        path = Path(str(args.output_prefix)+'.diagnostic.json')
+        publish({path:encode_json(failed)},args.overwrite,[source,args.pdb,args.report])
+        LOG.error('Validation failed; audit diagnostic: %s',path)
+        raise
     metrics = profile_metrics(particle, center, edges, profiles, analysis.original)
     status = acceptance(geometry, metrics, config["profile_tolerance"], config["composition_tolerance"])
     report = base_report(args, started)

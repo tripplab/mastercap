@@ -520,6 +520,8 @@ never the current interpretation of its mode. A v0.1.7 steric record without
 `ratio` produces a compatibility warning and retains its saved 1.371 A limit.
 The final distance audit still rejects actual sub-covalent inter-residue pairs:
 a legacy limit is readable, but does not exempt its coordinates from that check.
+Failed standalone audits save `PREFIX.diagnostic.json` with measured distances
+and named atoms; they preserve the original PDB and generation report.
 Reports predating override records explicitly use reference limits. Analysis is
 rebuilt from the reference; there is no separate saved-analysis loader.
 

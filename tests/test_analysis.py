@@ -193,3 +193,35 @@ def test_reference_mode_pair_remains_measured_steric_evidence():
     sulfur=next(r for r in records if r['pair']=='S-S')
     assert sulfur['source_pair']=='C-S'
     assert resolved['S','S']==pytest.approx(2.709/3.5*3.6)
+
+
+def test_legacy_unsafe_coordinates_write_named_distance_audit_diagnostic(tmp_path,capsys):
+    import hashlib
+    import json
+    from mastercap.cli import main
+    from mastercap.pdbio import pdb_text,read_pdb
+    source=Structure([Atom('C' if i%2==0 else 'SG',e,'CYS',i//2) for i,e in enumerate(('C','S','C','S'))],
+                     np.array([[-3.,0,0],[-1.,0,0],[1.,0,0],[3.,0,0]]))
+    reference=tmp_path/'reference.pdb';reference.write_text(pdb_text(source)[0])
+    prefix=tmp_path/'old'
+    assert main(['generate','--input',str(reference),'--output-prefix',str(prefix),'--seed','42',
+                 '--min-pair-samples','2','--allow-approximate','--refine-updates','0']) == 2
+    pdb=prefix.with_suffix('.pdb'); report=prefix.with_suffix('.json')
+    saved=json.loads(report.read_text()); saved['mastercap_version']='0.1.7'
+    entry=saved['analysis']['distance_limit_overrides'][0]
+    entry.pop('ratio'); entry.pop('source_pair'); entry['new_value']=1.371
+    particle=read_pdb(pdb,generated=True)
+    particle.xyz[:]=[[-3.,0,0],[-1.,0,0],[2.39,0,0],[.39,0,0]]
+    pdb.write_text(pdb_text(particle)[0]); saved['pdb_sha256']=hashlib.sha256(pdb.read_bytes()).hexdigest()
+    report.write_text(json.dumps(saved)); original=report.read_bytes()
+    output=tmp_path/'failed'
+    assert main(['validate','--input',str(reference),'--pdb',str(pdb),'--report',str(report),
+                 '--output-prefix',str(output)]) == 1
+    diagnostic=json.loads((tmp_path/'failed.diagnostic.json').read_text())
+    assert diagnostic['connectivity_audit']['passed']
+    sulfur=diagnostic['pair_distance_audit']['pairs']['S-S']
+    assert sulfur['minimum_distance_angstrom']==pytest.approx(1.39)
+    assert sulfur['below_covalent_floor_count']==1
+    assert 'serial 2 SG CYS' in diagnostic['error'] and 'serial 4 SG CYS' in diagnostic['error']
+    assert report.read_bytes()==original
+    assert not output.with_suffix('.json').exists()
