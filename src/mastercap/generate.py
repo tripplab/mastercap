@@ -1,6 +1,7 @@
 """Bounded geometric search. Failure to converge is not proof of infeasibility."""
 from collections import defaultdict
 from dataclasses import replace
+import logging
 import time
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
@@ -10,7 +11,9 @@ from scipy.spatial.transform import Rotation
 from .model import Structure, MastercapError
 from .analysis import shell_volumes
 from .constraints import GeometryMetadata, local_geometry, validate_geometry, profile_metrics, acceptance
-from .refinement import PushController, apply_radial_push, candidate_key, error_summary
+from .refinement import (PushController, apply_radial_push, candidate_key, error_summary,
+                         slack_summary, consolidation_targets, AcceptanceController,
+                         accept_trial, force_summary)
 
 
 def residue_groups(structure):
@@ -298,20 +301,26 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
            progress_interval=5, refine_iterations=None, stage_progress=None,
            selection_objective="total", refine_updates=50, refine_patience=10,
            refine_strength=0.005, refine_max_step=0.05, refine_fraction=0.2,
-           refine_recovery_limit=10, neighbor_forces="scaled"):
+           refine_recovery_limit=10, neighbor_forces="scaled", refine_slack=0.02,
+           consolidate_iterations=10, refine_acceptance="per-atom",
+           rollback_violation_fraction=0.05, rollback_component_limit=5000):
     preparation_started = time.monotonic()
     if (max_iterations < 0 or time_limit <= 0 or margin < 0 or progress_interval < 1
             or (refine_iterations is not None and refine_iterations < 0)
-            or refine_updates < 0 or refine_patience < 0 or refine_recovery_limit < 0):
+            or refine_updates < 0 or refine_patience < 0 or refine_recovery_limit < 0
+            or consolidate_iterations < 0 or rollback_component_limit < 1):
         raise MastercapError("Iteration/update/patience/recovery limits and margin must be nonnegative; time/progress interval positive")
-    if (not np.isfinite([refine_strength, refine_max_step, refine_fraction]).all()
+    if (not np.isfinite([refine_strength, refine_max_step, refine_fraction, refine_slack, rollback_violation_fraction]).all()
             or refine_strength <= 0 or refine_strength > np.finfo(float).max/4
-            or refine_max_step <= 0 or not 0 < refine_fraction <= 1):
+            or refine_max_step <= 0 or not 0 < refine_fraction <= 1 or refine_slack < 0
+            or not 0 <= rollback_violation_fraction <= 1):
         raise MastercapError("Refinement strength/max step must be finite and positive; fraction must be in (0, 1]")
     if selection_objective not in ("total", "worst-element"):
         raise MastercapError("Selection objective must be total or worst-element")
     if neighbor_forces not in ("scaled", "off", "fixed"):
         raise MastercapError("Neighbor forces must be scaled, off or fixed")
+    if refine_acceptance not in ("per-atom", "rollback"):
+        raise MastercapError("Refinement acceptance must be per-atom or rollback")
     if stage_progress:
         stage_progress("Building inventory metadata and initializing particle coordinates")
     metadata = GeometryMetadata.build(structure, analysis.limits)
@@ -327,10 +336,17 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         quantiles[e] = profile_quantiles(profile, edges, len(indices))
     best, best_key = None, (float("inf"),)*4
     first_feasible = None
+    phase = "repair"
+    consolidation_steps = consolidation_failures = 0
+    slack_first = slack_after = None
     profile_updates = 0
     feasible_iterations, push_history, best_history = [], [], []
+    restored_iterations = []
+    restored_snapshot = False
     initial_metrics = None
-    controller = PushController(refine_strength, refine_recovery_limit, len(structure.atoms), push_history)
+    controller = (AcceptanceController(refine_strength, push_history) if refine_acceptance == "per-atom"
+                  else PushController(refine_strength, refine_recovery_limit, len(structure.atoms), push_history,
+                                      rollback_violation_fraction, rollback_component_limit))
     last_significant_key = None
     last_improvement_update = 0
     improvement_relative = 0.001
@@ -352,7 +368,9 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         metrics = profile_metrics(candidate, center, edges, profiles, analysis.original, metadata=metadata)
         if initial_metrics is None:
             initial_metrics = {"total_profile_error": metrics["total_profile_error"], "elements": metrics["elements"]}
-        rolled_back = controller.observe(iteration, geometry, structure.xyz)
+        summary = error_summary(metrics)
+        rolled_back = controller.observe(iteration, geometry, structure.xyz,
+                                         candidate_key(metrics, selection_objective), summary)
         if rolled_back and stage_progress:
             record = push_history[-1]
             stage_progress(f"Rollback push from iteration {record['iteration']} at iteration {iteration}: "
@@ -360,10 +378,13 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         status = acceptance(geometry, metrics, profile_tolerance, composition_tolerance)
         last_report = {"geometry": geometry, "metrics": metrics, "status": status,
                        "iterations": iteration, "elapsed_seconds": time.monotonic()-started}
-        if geometry["mandatory_pass"]:
+        if restored_snapshot:
+            restored_iterations.append(iteration)
+        if geometry["mandatory_pass"] and not restored_snapshot and not rolled_back:
             feasible_iterations.append(iteration)
             if first_feasible is None:
                 first_feasible = iteration
+                slack_first = slack_summary(local, metadata, margin, mode)
                 if stage_progress and refine_updates and refine_iterations != 0 and status != "valid":
                     stage_progress(f"Geometry feasible at iteration {iteration}; refining per-element profiles "
                                    f"for up to {refine_updates} pushes within remaining search limits")
@@ -381,6 +402,29 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                                    f"total={summary['total_profile_error']:.6f}, "
                                    f"max element={summary['max_element_error']:.6f} ({summary['worst_element']}); "
                                    f"objective={selection_objective}")
+        if first_feasible is not None and geometry["mandatory_pass"] and phase == "repair":
+            phase = "consolidate" if consolidate_iterations and consolidation_failures <= 3 else "refine"
+            if phase == "consolidate" and stage_progress:
+                stage_progress(f"Starting consolidation at iteration {iteration}: slack={refine_slack:g} A")
+        if phase == "consolidate":
+            if not geometry["mandatory_pass"]:
+                consolidation_failures += 1
+                consolidation_steps = 0
+                phase = "repair"
+                if stage_progress:
+                    detail = (f"restart {consolidation_failures}/3" if consolidation_failures <= 3
+                              else "restart budget exhausted; repair then refine")
+                    stage_progress(f"Consolidation interrupted; repairing geometry ({detail})")
+            else:
+                gaps = slack_summary(local, metadata, margin, mode)
+                ready = all(gaps[k] is None or gaps[k] >= refine_slack/2
+                            for k in ("distance_gap_min_angstrom", "contact_gap_min_angstrom"))
+                if ready or consolidation_steps >= consolidate_iterations:
+                    phase, slack_after = "refine", gaps
+                    if stage_progress:
+                        stage_progress(f"Consolidation complete at iteration {iteration}; starting profile refinement")
+        if phase == "refine" and slack_after is None:
+            slack_after = slack_summary(local, metadata, margin, mode)
         reason = None
         if status == "valid" or (geometry["mandatory_pass"] and (refine_iterations == 0 or refine_updates == 0)):
             reason = "constraints_satisfied"
@@ -390,6 +434,12 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         elif first_feasible is not None and refine_iterations is not None and iteration-first_feasible >= refine_iterations:
             reason = "refinement_complete"
             stop_limit = "refine_iterations"
+        elif controller.blocked:
+            reason, stop_limit = "refinement_blocked", "damage_independent_of_push"
+            evidence = controller.blocked_evidence
+            logging.getLogger(__name__).warning("Refinement blocked: damage did not decrease with push strength "
+                               f"(strength {evidence['first_strength']:g}->{evidence['last_strength']:g}, "
+                               f"damage {evidence['first_damage']}->{evidence['last_damage']}); check neighbor forces/slack")
         elif controller.stalled or (first_feasible is not None and refine_patience > 0
                                     and profile_updates-last_improvement_update >= refine_patience):
             reason = "refinement_stalled"
@@ -411,8 +461,12 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             # All graphs describe the evaluated, damaged coordinates. The next
             # iteration checks the restored snapshot; never use stale graphs.
             del local
+            restored_snapshot = True
             continue
-        force = np.zeros_like(structure.xyz)
+        restored_snapshot = False
+        pieces = {name: np.zeros_like(structure.xyz) for name in
+                  ("repair", "bridges", "radial_clip", "centering", "radial_push", "nearest_neighbor")}
+        force = pieces["repair"]
         repair = local["distances"] < local["lower"]+0.003
         if mode == "residue":
             residues = metadata.residues
@@ -427,33 +481,68 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             bridges = group[connect_edges(candidate.xyz[group], local["internal_labels"][group],
                                          metadata=metadata, atom_indices=group, margin=margin)]
             cap = metadata.radii[bridges].sum(axis=1)-margin-0.003
-            pair_forces(force, structure.xyz, bridges, cap, strength=0.3)
+            pair_forces(pieces["bridges"], structure.xyz, bridges, cap, strength=0.3)
         if local["components"] > 1:
             bridges = connect_edges(candidate.xyz, local["labels"], metadata=metadata, margin=margin)
             cap = metadata.radii[bridges].sum(axis=1)-margin-0.003
-            pair_forces(force, structure.xyz, bridges, cap, strength=0.15)
+            pair_forces(pieces["bridges"], structure.xyz, bridges, cap, strength=0.15)
         offset = structure.xyz-center
         radial = np.linalg.norm(offset, axis=1)
         direction = offset/np.maximum(radial, 1e-12)[:, None]
         direction[radial < 1e-12] = [1, 0, 0]
         clipped = np.clip(radial, edges[0]+0.002, edges[-1]-0.002)
-        force += (clipped-radial)[:, None]*direction*0.8
+        pieces["radial_clip"][:] = (clipped-radial)[:, None]*direction*0.8
+        pieces["centering"][:] = (center-structure.xyz.mean(axis=0))*0.1
+        if phase == "consolidate":
+            near, desired, touching, contact = consolidation_targets(local, metadata, refine_slack, margin, mode)
+            pair_forces(force, structure.xyz, near, desired, strength=0.3)
+            pair_forces(pieces["bridges"], structure.xyz, touching, contact, strength=0.15)
+            consolidation_steps += 1
+        force = sum(pieces.values())
+        before_push = None
         # Soft radial transport; rank by current radius for each element.
-        if geometry["mandatory_pass"]:
-            details, selected = apply_radial_push(force, radial, direction, metadata.element_indices, quantiles,
+        if geometry["mandatory_pass"] and phase == "refine":
+            push_force = pieces["radial_push"]
+            push_source = candidate if refine_acceptance == "per-atom" else structure
+            push_offset = push_source.xyz-center
+            push_radial = np.linalg.norm(push_offset, axis=1)
+            push_direction = push_offset/np.maximum(push_radial, 1e-12)[:, None]
+            push_direction[push_radial < 1e-12] = [1, 0, 0]
+            details, selected = apply_radial_push(push_force, push_radial, push_direction, metadata.element_indices, quantiles,
                                                   controller.strength, refine_max_step, refine_fraction)
             scaled = neighbor_forces == "scaled"
             neighbor_details = characteristic_forces(
-                force, structure, analysis, metadata, mode=neighbor_forces, margin=margin,
+                pieces["nearest_neighbor"], push_source, analysis, metadata, mode=neighbor_forces, margin=margin, guard=refine_slack,
                 strength=0.002*(controller.strength/refine_strength) if scaled else 0.002,
                 max_move=refine_max_step/2 if scaled else None,
                 selected_indices=selected if scaled else None)
             details["neighbor_forces"] = neighbor_details
-            controller.start(iteration, structure.xyz, details)
+            details["profile_before"] = summary
+            details["force_components"] = {name: force_summary(values) for name, values in pieces.items()}
+            details["applied_force_components"] = (["radial_push", "nearest_neighbor"] if refine_acceptance == "per-atom"
+                                                   else list(pieces))
+            push_force = push_force+pieces["nearest_neighbor"]
+            if refine_acceptance == "per-atom":
+                trial = Structure(structure.atoms, candidate.xyz.copy())
+                update_positions(trial, push_force, groups, mode)
+                accepted, checked = accept_trial(candidate.xyz, trial.xyz, local, metadata, center, edges,
+                                                 margin, mode, refine_max_step, selected_indices=selected)
+                details.update(checked)
+                details["actual_move"] = force_summary(accepted-candidate.xyz)
+                controller.start(iteration, candidate.xyz, details, candidate_key(metrics, selection_objective))
+                structure.xyz[:] = accepted
+            else:
+                force += push_force
+                before_push = structure.xyz.copy()
+                controller.start(iteration, structure.xyz, details, candidate_key(metrics, selection_objective))
             profile_updates += 1
-        force += (center-structure.xyz.mean(axis=0))*0.1
+            if refine_acceptance == "per-atom":
+                del local, force, push_force, pieces
+                continue
         update_positions(structure, force, groups, mode)
-        del local, force
+        if before_push is not None:
+            push_history[-1]["actual_move"] = force_summary(structure.xyz-before_push)
+        del local, force, pieces
     controller.finish()
     last_search_geometry = last_report["geometry"]
     if best is not None:
@@ -475,6 +564,19 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     report.update({"feasible_iterations": feasible_iterations, "push_history": push_history,
                    "best_history": best_history, "initial_metrics": initial_metrics})
     report["profile_error_objective"] = selection_objective
+    report.update({"slack_at_first_feasible": slack_first, "slack_after_consolidation": slack_after,
+                   "consolidation_restarts": min(consolidation_failures, 3),
+                   "consolidation_failures": consolidation_failures, "search_phase": phase})
+    report.update({"restored_snapshot_iterations": restored_iterations,
+                   "blocked_evidence": getattr(controller, "blocked_evidence", None)})
+    fractions = [p["acceptance_fraction"] for p in push_history if "acceptance_fraction" in p]
+    report.update({"acceptance_mode": refine_acceptance,
+                   "committed_pushes": sum(p.get("atoms_moved", p.get("outcome") == "recovered_improved") > 0 for p in push_history),
+                   "mean_acceptance_fraction": float(np.mean(fractions)) if fractions else None,
+                   "recoveries_improved": sum(p["outcome"] == "recovered_improved" for p in push_history),
+                   "recoveries_worse": sum(p["outcome"] == "recovered_worse" for p in push_history),
+                   "repair_attempts": sum(p.get("recovery_iterations", 0) not in (None, 0)
+                                          or p.get("rollback_after_repair_iterations", 0) > 0 for p in push_history)})
     report.update({"rollback_count": controller.rollbacks, "refinement_strength_final": controller.strength,
                    "refinement_stop_limit": stop_limit, "last_search_geometry": last_search_geometry,
                    "last_significant_improvement_update": last_improvement_update,
@@ -484,7 +586,10 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                        "maximum_strength": controller.maximum, "fraction": refine_fraction,
                        "max_step_angstrom": refine_max_step, "recovery_limit": refine_recovery_limit,
                        "neighbor_forces": neighbor_forces,
-                       "big_damage_distance_fraction": 0.0005, "big_damage_component_limit": 50}})
+                       "refine_slack_angstrom": refine_slack, "consolidate_iterations": consolidate_iterations,
+                       "acceptance": refine_acceptance,
+                       "big_damage_distance_fraction": rollback_violation_fraction,
+                       "big_damage_component_limit": rollback_component_limit}})
     report["initial_transforms"] = rotations
     return output, report
 

@@ -96,7 +96,9 @@ def test_validation_plot_honors_no_smoothing_in_legacy_report(tmp_path, small_pd
     report["analysis"].pop("smoothing")
     for field in ("progress_interval", "refine_iterations", "no_check_certificate", "selection_objective",
                   "refine_updates", "refine_patience", "refine_strength", "refine_max_step",
-                  "refine_fraction", "refine_recovery_limit"):
+                  "refine_fraction", "refine_recovery_limit", "neighbor_forces", "refine_slack",
+                  "consolidate_iterations", "refine_acceptance", "rollback_violation_fraction",
+                  "rollback_component_limit"):
         report["configuration"].pop(field)
     report_path.write_text(json.dumps(report))
     settings = []
@@ -129,7 +131,8 @@ def test_progress_interval_and_final_sample(small_structure, interval, expected)
 def test_stage_messages_precede_warning_and_show_refinement(tmp_path, small_pdb, capsys):
     prefix = tmp_path/"stages"
     assert main(["generate", "--input", str(small_pdb), "--output-prefix", str(prefix), "--seed", "42",
-                 "--no-smoothing", "--allow-approximate", "--progress-interval", "2", "--refine-iterations", "3"]) == 2
+                 "--no-smoothing", "--allow-approximate", "--progress-interval", "2", "--refine-iterations", "3",
+                 "--consolidate-iterations", "0"]) == 2
     output = capsys.readouterr().err
     assert output.index("Reading reference coordinates") < output.index("WARNING: Reference analysis")
     for text in ("Estimating element-pair", "Selecting integer residue inventory", "Initializing", "refining per-element",

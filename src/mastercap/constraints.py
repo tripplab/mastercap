@@ -86,7 +86,7 @@ def local_geometry(structure, limits, margin=0.0, mode="independent", *, metadat
     compound = np.unique(np.column_stack([residues, internal_labels]), axis=0)
     unique, counts = np.unique(compound[:, 0], return_counts=True)
     disconnected = unique[counts > 1].astype(int).tolist()
-    return {"pairs": pairs, "distances": distances, "lower": lower,
+    return {"xyz": xyz, "pairs": pairs, "distances": distances, "lower": lower,
             "violations": violation, "overlap_edges": edges, "labels": labels,
             "internal_labels": internal_labels, "components": int(count), "isolated_atoms": int(np.sum(degree == 0)),
             "disconnected_residues": disconnected, "internal_exemptions": int(exemptions.sum())}

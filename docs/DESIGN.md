@@ -10,7 +10,7 @@ thresholds remain provisional until calibrated on expanded CCMV 1CWP.
 | `analysis.py` | Center, bounds, volume-aware profiles, smoothing, pair statistics. |
 | `constraints.py` | Spatial checks, internal/global graphs, acceptance metrics. |
 | `generate.py` | Integer inventory, initialization, bounded repair, rigid projection. |
-| `refinement.py` | Candidate ranking, capped partial pushes, damage feedback and rollback. |
+| `refinement.py` | Candidate ranking, slack targets, checked partial pushes, acceptance and rollback controllers. |
 | `reports.py` | JSON/CSV/PNG, staged output and rollback. |
 | `cli.py` | Combined workflows, configuration, provenance and reread validation. |
 
@@ -51,24 +51,54 @@ and controller live in `refinement.py`; noise-aware selection is not implemented
 Use deterministic volume-aware radial quantiles, rank all atoms, and push the
 largest-mismatch fraction per element (default 0.2). Radial strength starts at
 0.005 and requested radial moves are capped at 0.05 A. Repair forces are computed
-before profile contributions. Nearest-neighbor contributions now run in that
-same feasible push block. The default `scaled` mode uses coefficient
+before profile contributions in the rollback path. First feasibility starts
+best-effort consolidation: up to 10 updates build 0.02 A distance/contact slack,
+using strengths 0.3/0.15 and one-third-window guards when the window is narrow.
+Radial clipping and centering continue. No profile/neighbor force is applied.
+Broken geometry returns to repair; at most three consolidation restarts are
+allowed. Record minimum/5th-percentile gaps and counts within 0.005 A at first
+feasibility and after consolidation. Final validation rules do not use slack.
+
+Nearest-neighbor contributions run in the feasible refinement block. The default `scaled` mode uses coefficient
 `0.002 * current_strength / starting_strength`, affects only radial-selected
 atoms, and caps each atom's accumulated neighbor vector at half the radial
 step cap. `off` disables this contribution; `fixed` uses coefficient 0.002,
 all atoms and no additional cap. Both active modes guard pair targets by
-0.003 A inside the lower-distance/contact window, skipping empty windows.
+the requested slack inside the lower-distance/contact window, skipping empty windows.
 The overall 0.2 A update cap and rigid projection still apply, so guarded
 targets alone do not guarantee feasibility of the combined update. Scalar
-neighbor move statistics are included with each push. The exact 1CWP off/fixed
-comparison must precede changes to consolidation and acceptance.
+neighbor move statistics are included with each push. The historical exact 1CWP
+off/fixed comparison at df200e5 confirmed strength-independent neighbor damage;
+see the checked-in benchmark measurements.
 
-One private full-coordinate snapshot supports rollback, including in rigid mode.
-Immediate feasibility grows strength by 1.25 up to 4x starting strength. Small
-damage is repaired without growth. More than 0.0005*N distance violations, at least
-50 components, or failure to recover within 10 repair updates restores the
-snapshot and halves strength. Coordinates alone are restored and the next loop
-recomputes geometry, avoiding stale graph reuse. Below starting strength/16,
+Default per-atom acceptance isolates radial and neighbor contributions from
+repair, radial clipping and centering. Apply the 0.2 A cap and rigid Kabsch
+projection to a copy, round to 0.001 A, and check moved atoms against snapshot
+pairs, existing edges, and new spatial neighbors (including rare-element large
+bounds). Candidate pairs cover both trial/trial and trial/snapshot positions,
+so reverting one atom cannot hide a mixed-state collision. Reject guarded
+distance violations, broken old contacts and out-of-bounds moves. Broken edges
+reject the farther-moving endpoint, or both for comparable moves. Recheck up
+to three passes, then revert offenders with their direct neighbors. Any remaining
+conflict or center error above 1 A restores the trial. Rigid mode rejects complete
+residues. Existing edges are retained, so no trial-time component calculation is
+needed. Next-iteration and independent export validation still rebuild geometry.
+Acceptance >85% grows strength by 1.25; <50% shrinks by 0.7. Its denominator
+counts selected proposals, including feasible stationary rounded proposals,
+expanded to complete residues in rigid mode. Actual moving/retained atoms are
+reported separately. Rounded zero-move trials count toward budget/patience; rejected proposals
+also consume a push. A private snapshot provides a validation safety net.
+
+The optional rollback path retains a snapshot and its ranking key. More than
+0.05*N distance violations, at least 5000 components, or failure to recover
+within 10 repair updates restores it; thresholds are configurable. Smaller
+damage gets a repair attempt. Retain recovered geometry only if its complete
+ranking key improves; otherwise restore and halve strength. Immediate improved
+recovery grows strength by 1.25 up to 4x starting strength. Re-evaluations of
+restored snapshots go into a separate list, excluding feasible/best histories.
+Across recent damaging rollbacks, a fourfold strength reduction without a 25%
+damage reduction stops further halving with `refinement_blocked` and evidence.
+Below starting strength/16,
 stop with `refinement_stalled`. Patience also stops after 10 pushes without a
 cumulative >0.1% relative primary-error improvement (floor 1e-12); 0 disables it.
 Budget/quality/clock/iteration precedence is documented in README. Best-candidate
@@ -77,8 +107,10 @@ coordinates remain an independent rounded copy throughout.
 Record feasible iterations, every best replacement and its key/element errors,
 initial metrics, and scalar push histories (never coordinate snapshots). Record
 next-state damage, completed repair length (0 for immediate feasibility), rollback
-reason and strength changes. Rolled-back attempts count toward the update budget
-but not the median of completed recoveries. Always log new best candidates and
+reason, strength changes, before/after profile summaries, per-force mean/max
+requested moves and actual moves. Per-atom checks add acceptance/rejection counts,
+reasons and pass counts. Coordinate/index arrays remain private. Attempts count
+toward the push budget even if rejected or rolled back. Always log new best candidates and
 label final infeasible samples separately from the exported candidate. Expose
 `refinement_updates`, `refinement_steps`, `rollback_count`, stopping limit and the
 last evaluated geometry, retaining existing per-element reports.

@@ -6,7 +6,8 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from mastercap.constraints import GeometryMetadata
+from mastercap.constraints import GeometryMetadata, local_geometry, validate_geometry
+from mastercap.refinement import accept_trial, consolidation_targets, slack_summary
 from mastercap.cli import main
 from mastercap.generate import characteristic_forces, search
 from mastercap.model import Atom, MastercapError, Structure
@@ -112,3 +113,142 @@ def test_cli_neighbor_modes_reach_search_and_export_valid_pdb(tmp_path, small_pd
         assert neighbor["max_move_angstrom"] == 0
     if mode == "scaled":
         assert neighbor["max_move_angstrom"] <= 0.025
+
+
+def test_consolidation_targets_build_slack_without_changing_validation():
+    from mastercap.generate import pair_forces
+    structure, analysis, metadata = pair_case(lower=1.997)
+    before = slack_summary(local_geometry(structure, analysis.limits, metadata=metadata), metadata)
+    for _ in range(10):
+        local = local_geometry(structure, analysis.limits, metadata=metadata)
+        near, targets, contacts, upper = consolidation_targets(local, metadata, 0.02)
+        force = np.zeros_like(structure.xyz)
+        pair_forces(force, structure.xyz, near, targets, strength=0.3)
+        pair_forces(force, structure.xyz, contacts, upper, strength=0.15)
+        structure.xyz = np.round(structure.xyz+force, 3)
+    after = slack_summary(local_geometry(structure, analysis.limits, metadata=metadata), metadata)
+    assert after["distance_gap_min_angstrom"] > before["distance_gap_min_angstrom"]
+    assert validate_geometry(structure, structure.xyz.mean(axis=0), np.array([0, 5]), analysis.limits)["mandatory_pass"]
+
+
+def test_narrow_consolidation_window_uses_one_third_gap():
+    structure, analysis, metadata = pair_case(lower=3.39)
+    structure.xyz[1, 0] = 3.391
+    local = local_geometry(structure, analysis.limits, metadata=metadata)
+    near, targets, _, _ = consolidation_targets(local, metadata, 0.02)
+    assert len(near) == 1
+    assert targets[0] == pytest.approx(3.39+0.01/3)
+
+
+def test_trial_rejects_broken_contact_and_keeps_feasible_snapshot():
+    structure, analysis, metadata = pair_case()
+    local = local_geometry(structure, analysis.limits, metadata=metadata)
+    trial = structure.xyz.copy()
+    trial[1, 0] = 4
+    committed, report = accept_trial(structure.xyz, trial, local, metadata,
+                                     structure.xyz.mean(axis=0), np.array([0, 10]))
+    assert report["atoms_undone"] == 1
+    assert report["undone_by_reason"]["contact_broken"] == 1
+    assert np.array_equal(committed, structure.xyz)
+    assert validate_geometry(Structure(structure.atoms, committed), structure.xyz.mean(axis=0),
+                             np.array([0, 10]), analysis.limits)["mandatory_pass"]
+
+
+def test_trial_rejects_entire_rigid_residue():
+    structure = Structure([Atom("C", "C", "GLY", i//2) for i in range(4)],
+                          np.array([[0.0, 0, 0], [1.2, 0, 0], [3.2, 0, 0], [4.4, 0, 0]]))
+    metadata = GeometryMetadata.build(structure, {("C", "C"): 1.0})
+    local = local_geometry(structure, {("C", "C"): 1.0}, mode="residue", metadata=metadata)
+    trial = structure.xyz.copy()
+    trial[2:] += [2, 0, 0]
+    committed, report = accept_trial(structure.xyz, trial, local, metadata,
+                                     structure.xyz.mean(axis=0), np.array([0, 10]), mode="residue")
+    assert report["atoms_undone"] == 2
+    assert np.array_equal(committed, structure.xyz)
+    assert np.linalg.norm(committed[2]-committed[3]) == pytest.approx(1.2)
+
+
+def test_trial_detects_new_collision_after_reverting_a_neighbor():
+    structure = Structure([Atom("C", "C", "GLY", i) for i in range(3)],
+                          np.array([[0.0, 0, 0], [1.2, 0, 0], [2.4, 0, 0]]))
+    metadata = GeometryMetadata.build(structure, {("C", "C"): 1.0})
+    local = local_geometry(structure, {("C", "C"): 1.0}, metadata=metadata)
+    trial = structure.xyz+np.array([[0, 0, 0], [0.9, 0, 0], [2, 0, 0]])
+    committed, report = accept_trial(structure.xyz, trial, local, metadata,
+                                     structure.xyz.mean(axis=0), np.array([0, 10]))
+    assert report["atoms_undone"] > 0
+    assert validate_geometry(Structure(structure.atoms, committed), structure.xyz.mean(axis=0),
+                             np.array([0, 10]), {("C", "C"): 1.0})["mandatory_pass"]
+
+
+def test_trial_checks_large_rare_element_bound_beyond_contact_radius():
+    structure = Structure([Atom("S", "S", "CYS", i) for i in range(2)],
+                          np.array([[0.0, 0, 0], [9.0, 0, 0]]))
+    metadata = GeometryMetadata.build(structure, {("S", "S"): 8.0})
+    local = local_geometry(structure, {("S", "S"): 8.0}, metadata=metadata)
+    assert len(local["pairs"]) == 0
+    trial = structure.xyz.copy()
+    trial[1, 0] = 7
+    committed, report = accept_trial(structure.xyz, trial, local, metadata,
+                                     structure.xyz.mean(axis=0), np.array([0, 10]))
+    assert report["undone_by_reason"]["too_close"] == 1
+    assert np.array_equal(committed, structure.xyz)
+
+
+def test_mixed_trial_snapshot_pair_is_checked_after_contact_rejection():
+    structure = Structure([Atom("C", "C", "GLY", i) for i in range(3)],
+                          np.array([[0.0, 0, 0], [5.0, 0, 0], [6.5, 0, 0]]))
+    metadata = GeometryMetadata.build(structure, {("C", "C"): 1.2})
+    local = local_geometry(structure, {("C", "C"): 1.2}, metadata=metadata)
+    assert not np.any(np.all(local["pairs"] == [0, 1], axis=1))
+    trial = structure.xyz.copy()
+    trial[:2, 0] = [4, 1]
+    committed, report = accept_trial(structure.xyz, trial, local, metadata,
+                                     structure.xyz.mean(axis=0), np.array([0, 10]))
+    assert report["undone_by_reason"]["contact_broken"] > 0
+    assert report["undone_by_reason"]["too_close"] > 0
+    assert np.array_equal(committed, structure.xyz)
+
+
+def test_trial_rejects_whole_push_when_center_tolerance_is_exceeded():
+    structure, analysis, metadata = pair_case()
+    local = local_geometry(structure, analysis.limits, metadata=metadata)
+    committed, report = accept_trial(structure.xyz, structure.xyz+[1.1, 0, 0], local, metadata,
+                                     structure.xyz.mean(axis=0), np.array([0, 10]))
+    assert report["center_rejected"]
+    assert report["atoms_accepted"] == 0
+    assert np.array_equal(committed, structure.xyz)
+
+
+def test_rigid_projected_trial_can_accept_moves_and_preserve_residue_shape(small_structure):
+    from mastercap.generate import update_positions
+    metadata = GeometryMetadata.build(small_structure, {("C", "C"): 1.59})
+    local = local_geometry(small_structure, {("C", "C"): 1.59}, mode="residue", metadata=metadata)
+    trial = small_structure.copy()
+    force = np.tile([100.0, 0, 0], (4, 1))
+    update_positions(trial, force, list(metadata.groups.values()), "residue")
+    committed, report = accept_trial(small_structure.xyz, trial.xyz, local, metadata, np.zeros(3),
+                                     np.array([0, 4]), mode="residue")
+    assert report["atoms_accepted"] == 4
+    assert np.max(np.linalg.norm(committed-small_structure.xyz, axis=1)) == pytest.approx(0.2)
+    for group in metadata.groups.values():
+        assert np.linalg.norm(committed[group[0]]-committed[group[1]]) == pytest.approx(1.6)
+    assert validate_geometry(Structure(small_structure.atoms, committed), np.zeros(3), np.array([0, 4]),
+                             {("C", "C"): 1.59}, mode="residue")["mandatory_pass"]
+
+
+def test_acceptance_denominator_includes_selected_stationary_proposals():
+    structure, analysis, metadata = pair_case()
+    trial = structure.xyz.copy()
+    trial[1, 0] = 4
+    local = local_geometry(structure, analysis.limits, metadata=metadata)
+    committed, report = accept_trial(structure.xyz, trial, local, metadata,
+                                     structure.xyz.mean(axis=0), np.array([0, 10]),
+                                     selected_indices=np.array([0, 1]))
+    assert np.array_equal(committed, structure.xyz)
+    assert report["atoms_proposed"] == 2
+    assert report["atoms_accepted"] == report["atoms_undone"] == 1
+    assert report["proposed_moving_atoms"] == 1
+    assert report["atoms_moved"] == 0
+    assert report["stationary_proposals"] == 1
+    assert report["acceptance_fraction"] == 0.5
