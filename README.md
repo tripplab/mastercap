@@ -387,7 +387,48 @@ same first-feasible seed-42 state. Its 50 pushes reached total error 0.049767,
 but S still had zero bin crossings and error 0.837037. S acceptance rose only to
 40.3%. This probe skips initial repair and is explicitly not another full CLI
 benchmark; it does not establish that a larger global slack resolves the local
-sulfur blockage. The scientific gate remains open.
+sulfur blockage. That revision-02 scientific gate remains open in the historical
+results; the revision-03 measurements below test a different initialization.
+
+Revision 03 benchmarks compare the measured S-S spacing (`S-S=reference`), the
+new default pooled steric limit, and opt-in sulfur-profile placement. The default
+placement remains `off`. For an exact v0.1.6 comparison also pass
+`--consolidate-noncontact-slack off`, since consolidation slack is a separate
+changed default. With both compatibility switches, seed 42 reproduces the old
+PDB byte for byte. Independent validation also accepts the old v0.1.6 report
+using its reference limits.
+
+Profile placement deliberately copies reference S shells. Zero S profile error
+therefore measures retention of that initialization, rather than independent
+molecular validation. It can increase initial repair time and trade a small
+increase in another element's error for lower total error. Runs that reach the
+cooperative time limit may complete fewer than 50 pushes; a feasible candidate
+still undergoes the mandatory final audit and independent validation. The JSON
+retains per-element comparisons and stop reasons instead of treating aggregate
+improvement as proof that every element improved.
+
+The unsmoothed v0.1.7 comparisons use the same 1CWP reference, 4 A bins and
+600 s search budget. Both columns use the new S-S steric limit:
+
+| Seed | Placement off: total / S error | Profile placement: total / S error | Profile pushes | Profile stop |
+|---|---:|---:|---:|---|
+| 42 | 0.051408 / 0.781481 | 0.048909 / 0 | 38 | time limit |
+| 7 | 0.053721 / 0.811111 | 0.049767 / 0 | 25 | time limit |
+| 2026 | 0.049888 / 0.851852 | 0.049599 / 0 | 50 | refinement complete |
+
+All 540 anchored S atoms remain in their assigned bins in these three profile
+runs. Each written PDB and standalone validation passes the independent audit
+(zero isolated atoms, one component, zero disconnected residues).
+**The strict no-C/N/O-regression expectation does not pass:** C is slightly
+worse for seed 42, N and O for seed 7, and C and O for seed 2026. These are geometric,
+uncalibrated outputs; lower total error does not establish chemical realism.
+
+The additional seed-42 profile-placement run with default 1 A smoothing reached
+total error 0.048623 and S error 0.001207, retaining all 540 anchors in their
+assigned bins. It stopped at the time limit after 40 pushes. Its target differs
+from the unsmoothed cases, so these errors are not a matched smoothing A/B test.
+All eleven revision-03 runs passed both the written-PDB audit and standalone
+validation with their saved distance overrides; outputs remain `uncalibrated`.
 
 With `--refine-acceptance rollback`, a full coordinate snapshot is saved before
 each push, including rigid residues. Damage below the configured disaster limits

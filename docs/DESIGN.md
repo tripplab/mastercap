@@ -156,6 +156,17 @@ unchanged. These traces identify locally blocked rare-element motion; they do
 not justify declaring sulfur convergence from aggregate acceptance or lowering
 the prescribed validation constraints. See `revision02` in the benchmark JSON.
 
+Revision 03 separates the S-S spacing override from opt-in S-shell placement.
+The full CLI matrix uses three seeds for reference spacing, steric spacing and
+profile placement, plus one smoothed profile-placement run. A separate seed-42
+compatibility run disables noncontact slack as well as the S-S override; compare
+the resulting PDB hash with v0.1.6 rather than assuming that changing only one
+default restores all old behavior. Keep paired C/N/O deltas and completed-push
+counts: reference-shell retention can improve S while increasing repair time or
+slightly worsening another element. This is a reported scientific trade-off,
+not a reason to weaken connectivity checks or silently change the default
+placement mode. See `revision03` in the benchmark JSON.
+
 The optional rollback path retains a snapshot and its ranking key. More than
 0.05*N distance violations, at least 5000 components, or failure to recover
 within 10 repair updates restores it; thresholds are configurable. Smaller
