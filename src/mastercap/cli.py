@@ -72,7 +72,7 @@ class ProfileToleranceAction(argparse.Action):
 def configure_tolerances(args,analysis,edges,settings=None,saved=None):
     if args.tolerances_from:
         settings=settings or profile_settings(analysis,edges,args.bin_width,args.radius_method,args.radius_percentiles)
-        value,composition,digest=load_tolerances(args.tolerances_from,settings,analysis.original)
+        value,composition,digest=load_tolerances(args.tolerances_from,settings,analysis.original,LOG.warning)
         args.profile_tolerance=value;args.composition_tolerance=composition
         args.profile_tolerance_spec=','.join(f'{e}={v}' for e,v in value.items())
         args.calibration_file=str(args.tolerances_from);args.calibration_sha256=digest
@@ -148,6 +148,8 @@ Input and output:
     "generate": """Examples:
   mastercap generate --input ./1cwp_full.vdb.gz --output-prefix results/particle --seed 42 --allow-approximate --csv --plot
   mastercap generate --id 1cwp --output-prefix results/particle --seed 42 --allow-approximate
+  mastercap generate --input reference.pdb --output-prefix results/particle --profile-tolerance C=0.02,N=0.04,O=0.04,S=0.15 --composition-tolerance 0
+  mastercap generate --input reference.pdb --output-prefix results/particle --tolerances-from results/calib_calibration.json
   mastercap generate --input reference.pdb --inner-radius 100 --outer-radius 130 --mode residue --distribution regular --output-prefix results/resized --seed 42 --allow-approximate
 
 Workflow and defaults:
@@ -212,7 +214,9 @@ Acceptance:
   Profile error = sum(abs(generated density - target density) * shell volume)
                   / target element count.
   Composition tolerance is relative, with a minimum allowance of one atom.
-  These quality tolerances have no scientifically calibrated defaults.
+  These quality tolerances have no automatic defaults. calibrate suggests values
+  from explicit reference resampling; --tolerances-from applies them only when
+  reference, model, bin width, smoothing and radii match.
   --allow-approximate NEVER permits violation of mandatory geometry/connectivity.
 
 Output:
@@ -348,7 +352,7 @@ def parser():
         command.add_argument("--cache-dir", type=Path, default=Path(os.environ.get("XDG_CACHE_HOME", Path.home()/".cache"))/"mastercap", help="VIPERdb cache directory (honors XDG_CACHE_HOME)")
         command.add_argument("--refresh", action="store_true", help="Download a fresh VIPERdb cache entry instead of reusing the existing one; applies to --id")
         command.add_argument("--no-check-certificate", action="store_true", help="Explicitly skip TLS certificate verification for VIPERdb downloads only (--id); default verification is enabled; does not bypass HTTP/network-policy errors")
-        command.add_argument("--output-prefix", type=Path, required=name!="calibrate", default=Path("results/calibration") if name=="calibrate" else None, help="Required output basename, e.g. results/particle; extensions are appended and parent directories created")
+        command.add_argument("--output-prefix", type=Path, required=name!="calibrate", default=Path("results/calibration") if name=="calibrate" else None, help="Calibration output basename; _calibration suffix is appended and parent directories created" if name=="calibrate" else "Required output basename, e.g. results/particle; extensions are appended and parent directories created")
         command.add_argument("--csv", action="store_true", help="Write PREFIX_calibration.csv" if name=="calibrate" else "Write radial density profiles to PREFIX_profiles.csv")
         command.add_argument("--plot", action="store_true", help="Write PREFIX_calibration.png" if name=="calibrate" else "Write radial density comparison plots to PREFIX_profiles.png")
         command.add_argument("--overwrite", action="store_true", help="Explicitly permit replacing existing output files")
@@ -524,7 +528,8 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
     report.update({"analysis_options": analysis_options(args), "analysis": analysis.summary(),
                    "acquisition": acquisition, "target": {"center": center.tolist(), "edges": edges.tolist(),
                    "profiles": {e: p.tolist() for e, p in profiles.items()}},
-                   "calibration": "pending_1cwp", "pdb_convention": "TER segments; serials and chains may repeat"})
+                   "calibration": ("reference_calibration_supplied" if args.tolerances_from else
+                                   "manual_tolerances" if args.profile_tolerance is not None or args.composition_tolerance is not None else "not_supplied"), "pdb_convention": "TER segments; serials and chains may repeat"})
     LOG.info("Selected reference: %d atoms; target radii %.3f..%.3f A; seed %d", len(analysis.structure.atoms), edges[0], edges[-1], args.seed)
     export_started = None
     try:
@@ -773,7 +778,7 @@ def run(args):
         if sibling.exists():
             try:prior=json.loads(sibling.read_text())
             except ValueError:prior={}
-            if prior.get('command')=='generate' or 'pdb_sha256' in prior:
+            if isinstance(prior,dict) and (prior.get('command')=='generate' or 'pdb_sha256' in prior):
                 raise MastercapError('Calibration prefix belongs to a generation report; choose a different prefix')
     protected = [source]
     if args.command=='calibrate':

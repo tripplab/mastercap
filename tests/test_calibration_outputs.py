@@ -13,6 +13,7 @@ def test_csv_and_png_include_sources_and_basis(tmp_path,small_pdb):
     assert main(['calibrate','--input',str(small_pdb),'--output-prefix',str(prefix),'--replicates','5',
                  '--generated',str(small_pdb),'--compare',str(small_pdb),'--floor-basis','counting','--csv','--plot'])==0
     data=json.loads((tmp_path/'calib_calibration.json').read_text())['calibration']
+    assert data['generated'][0]['errors']['C']==data['levels']['self']['C']['mean']
     rows=list(csv.DictReader(io.StringIO((tmp_path/'calib_calibration.csv').read_text())))
     assert list(rows[0])==CALIBRATION_COLUMNS
     assert len(rows)==6*2

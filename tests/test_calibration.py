@@ -101,6 +101,9 @@ def test_cli_never_generates_and_protects_generation_prefix(tmp_path,small_pdb,m
     prefix=tmp_path/'same'
     prefix.with_suffix('.json').write_text(json.dumps({'command':'generate'}))
     assert main(['calibrate','--input',str(small_pdb),'--output-prefix',str(prefix),'--overwrite'])==1
+    prefix.with_suffix('.json').write_text('[]')
+    assert main(['calibrate','--input',str(small_pdb),'--output-prefix',str(prefix),'--replicates','2'])==0
+    assert prefix.with_suffix('.json').read_text()=='[]'
     out=tmp_path/'calib'
     assert main(['calibrate','--input',str(small_pdb),'--output-prefix',str(out),'--replicates','2'])==0
     assert sorted(p.name for p in tmp_path.glob('calib*'))==['calib_calibration.json']
@@ -119,3 +122,27 @@ def test_levels_order_on_element_correlated_shells():
     levels=resampling_levels(a,a.edges,a.smoothed,20,42)
     for e in ('C','N'):
         assert levels['counting'][e]['mean']<levels['orientation'][e]['mean']<levels['placement'][e]['mean']
+
+
+@pytest.mark.parametrize('key,value,label',[
+ ('reference_hash','other','reference hash'),('model',2,'model'),('bin_width',4,'bin width'),
+ ('smoothing_sigma',2,'smoothing sigma'),('inner_radius',2,'inner radius'),('outer_radius',5,'outer radius')])
+def test_settings_cannot_cross_reference_or_profile_definitions(key,value,label):
+    from mastercap.calibration import check_settings
+    settings={'reference_hash':'abc','model':1,'bin_width':1.,'smoothing_sigma':0.,'inner_radius':1.,'outer_radius':4.,
+              'radius_method':'extrema','radius_percentiles':[.5,99.5],'edges_count':4}
+    changed={**settings,key:value}
+    with pytest.raises(ValueError,match='Calibration settings differ: '+label):check_settings(settings,changed)
+
+
+def test_chain_label_profiles_are_scaled_to_full_counts():
+    from mastercap.calibration import chain_spread
+    xyz=np.array([[r*sign,0,0] for r in (1.,3.) for sign in (-1,1) for _ in range(500)])
+    atoms=[Atom('C','C','ALA',i,{'chain':'A' if i<1000 else 'B'}) for i in range(2000)]
+    a=analyze(Structure(atoms,xyz),width=1,sigma=0,compute_distances=False)
+    spread=chain_spread(a,a.edges,a.smoothed)
+    assert spread['available'] and not spread['used_for_suggestions']
+    assert spread['pairwise'][0]['errors']['C']==pytest.approx(2)
+    assert spread['labels']['A']['shape']['C']==pytest.approx(1)
+    a.structure.atoms=[Atom(atom.name,atom.element,atom.resname,atom.residue) for atom in atoms]
+    assert not chain_spread(a,a.edges,a.smoothed)['available']

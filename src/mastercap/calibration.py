@@ -120,16 +120,16 @@ def settings_from_generation(saved):
             'radius_percentiles':options['percentiles']}
 
 
-def load_tolerances(path,current,elements):
+def load_tolerances(path,current,elements,warning=None):
     data=Path(path).read_bytes()
     try:
         report=json.loads(data)
-        if report.get('command')!='calibrate' or report.get('schema_version')!=1:
+        if not isinstance(report,dict) or report.get('command')!='calibrate' or report.get('schema_version')!=1:
             raise MastercapError('Not a supported calibration report')
         calibration=report['calibration']
         check_settings(calibration['settings'],current)
         suggested=calibration['suggested']
-        value=check_coverage(suggested['profile_tolerance'],elements)
+        value=check_coverage(suggested['profile_tolerance'],elements,warning)
         composition=float(suggested['composition_tolerance'])
         if value is None or not np.isfinite(composition) or composition<0:
             raise MastercapError('Invalid suggested tolerances')

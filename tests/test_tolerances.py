@@ -66,6 +66,7 @@ def test_calibration_load_match_and_no_dependency_on_deleted_file(tmp_path,small
                '--seed','42','--allow-approximate','--refine-updates','0'])
     assert code in (0,2)
     report=json.loads(output.with_suffix('.json').read_text())
+    assert report['calibration']=='reference_calibration_supplied'
     assert report['configuration']['calibration_sha256']==digest
     assert isinstance(report['configuration']['profile_tolerance'],dict)
     calibration.unlink()
@@ -85,3 +86,19 @@ def test_calibration_mismatch_and_conflicts(tmp_path,small_pdb,monkeypatch,capsy
         with pytest.raises(SystemExit) as exc:
             main(['generate','--input','missing','--output-prefix','out','--tolerances-from',str(path),option,value])
         assert exc.value.code==2
+
+
+def test_unused_elements_from_calibration_are_warned_and_ignored(tmp_path,small_pdb):
+    from mastercap.calibration import load_tolerances
+    prefix=tmp_path/'extra'
+    assert main(['calibrate','--input',str(small_pdb),'--output-prefix',str(prefix),'--replicates','2'])==0
+    path=tmp_path/'extra_calibration.json';report=json.loads(path.read_text())
+    report['calibration']['suggested']['profile_tolerance']['N']=.1
+    path.write_text(json.dumps(report))
+    warnings=[]
+    value,composition,digest=load_tolerances(path,report['calibration']['settings'],['C'],warnings.append)
+    assert 'N' not in value and composition==0 and len(digest)==64
+    assert len(warnings)==1 and 'N is absent' in warnings[0]
+    path.write_text('[]')
+    with pytest.raises(ValueError,match='supported calibration report'):
+        load_tolerances(path,report['calibration']['settings'],['C'])

@@ -7,14 +7,15 @@ Particles approximate the radial element density and residue composition of an
 **already expanded, complete protein capsid**. They are for geometry and
 visualization, not chemically valid protein design or molecular dynamics.
 
-Version 0.1.8 adds element-derived steric limits, a covalent floor and independent
-inter-residue distance auditing. Optional sulfur placement has spacing checks,
-a repair-only radial dead zone, refinement bin protection and a reference-radius
-mode. Sulfur placement remains off unless explicitly selected.
+Version 0.1.9 adds `calibrate`, per-element profile tolerances and explicit
+`--tolerances-from` loading with reference/settings checks. Calibration measures
+radial error scales and suggests thresholds; it never generates a particle or
+relaxes mandatory geometry. Without supplied tolerances, generation remains
+uncalibrated.
 
-**Status:** geometric prototype with synthetic regression tests and complete
-1CWP benchmarks below. Scientific calibration and broader capsid coverage remain
-pending.
+**Status:** geometric prototype with synthetic regression tests, complete 1CWP
+benchmarks and reference-resampling calibration. Independent experimental
+validation and broader capsid coverage remain pending.
 The bounded heuristic search may fail to find a feasible particle.
 
 ## Installation
@@ -670,6 +671,137 @@ iteration computes one neighbor/overlap graph on PDB-rounded coordinates and
 reuses it for checking and proposing repairs. Final export still independently
 rereads the written PDB and rebuilds its geometry checks.
 
+## Calibration
+
+Calibrate one complete reference at the **same bin width, smoothing, model and
+radii** that generation will use:
+
+```bash
+mastercap calibrate --input ./1cwp_full.vdb.gz --bin-width 4 --no-smoothing \
+  --replicates 50 --seed 42 --output-prefix results/calib_1cwp --csv --plot
+
+mastercap generate --input ./1cwp_full.vdb.gz --bin-width 4 --no-smoothing \
+  --tolerances-from results/calib_1cwp_calibration.json \
+  --output-prefix results/particle --seed 42
+
+# Reassess an existing particle using the calibration, preserving its original report.
+mastercap validate --input ./1cwp_full.vdb.gz --pdb results/particle.pdb \
+  --report results/particle.json --tolerances-from results/calib_1cwp_calibration.json \
+  --output-prefix results/validation
+```
+
+`calibrate` writes `PREFIX_calibration.json`, optionally `.csv` and `.png`.
+It never writes a PDB. It refuses a prefix already belonging to a generation
+report even with `--overwrite`; use a distinct prefix. Its profile analysis
+skips distance limits entirely, so it has no `--pair-limit-override` option.
+
+The reported levels use the same volume-weighted integrated absolute error as
+generation, divided by each element's target count. Total is atom-weighted:
+
+- **Self:** the reference against its target; zero without smoothing, otherwise
+  it shows smoothing bias.
+- **Counting:** independent multinomial bin counts at each reference element's
+  atom count. This measures typical finite-count fluctuations.
+- **Orientation:** rotate every reference residue about its **own centroid**,
+  leaving that centroid and its radius fixed. This measures sensitivity to free
+  residue orientation, and is the default suggestion basis.
+- **Placement:** additionally permute centroid radii among residues, retaining
+  their original directions. This removes the element/radius correlation. It is
+  a model baseline, not the exact generator initialization algorithm.
+
+Each stochastic level has mean, population SD, p05/p50/p95 and extrema over
+`--replicates` (default 50, seed 42). These are reference-resampling scales, not
+proven lower bounds: fitting profiles deliberately can beat the orientation
+mean. Levels retain reference atom counts and centroids even when target radii
+are overridden; resized targets can therefore include an inventory/geometry
+mismatch in these error scales.
+
+Repeat `--compare other.pdb` for experimental whole-particle comparisons. Each
+uses its own geometric center and the reference edges. JSON retains raw errors,
+per-element count ratios, and shape errors normalized to the target's in-range
+count; actual and in-range counts are reported. Missing target elements
+or no in-range support cause a clear error. CSV comparison rows show **shape**
+error; JSON also retains raw error. Chain labels with at least 1000 atoms each
+provide a separate scaled profile-spread diagnostic, not an automatic tolerance
+increase or an independent whole-particle experiment.
+
+Repeat `--generated particle.pdb` to assess generated structures. A sibling
+`.json`, when present, must match the reference hash, model, bins, smoothing and
+radii, and binds the PDB hash; its saved center is used. Without a sibling, use
+the analysis center. Reports and CSV express errors as multiples of counting and
+orientation means and give `(placement - error)/(placement - orientation)`.
+`gap_closed` retains raw values, including above 1 or negative; JSON additionally
+provides `gap_closed_clipped` capped at 1. Zero denominators/nonpositive gaps are
+null with a reason, never invented finite ratios. Log plots mark zero errors at
+an explicitly labelled display position. No Total tolerance is applied.
+
+Suggestions default to **2 times the orientation p95**, rounded upward to three
+significant figures. Choose `--floor-multiple`, `--floor-basis counting` or
+`--floor-statistic mean` explicitly to change that rule. An explicit comparison's
+largest shape error raises the suggestion when larger. Composition is suggested
+as 0, retaining the existing one-atom allowance. Suggestions are logged as a
+ready-to-paste command and stored with the rule used for each element.
+
+Tolerances are **never applied automatically**. Generate and validate accept:
+
+```bash
+--profile-tolerance 0.03
+--profile-tolerance C=0.02,N=0.04,O=0.04,S=0.15
+--profile-tolerance 'C=0.02,N=0.04,*=0.05'
+```
+
+Every target element needs an explicit value or `*`; duplicate/unknown elements,
+negative/nonfinite values and mixed scalar/map forms are errors. Absent reference
+elements are warned about and ignored. The config records the normalized map and
+original string; `metrics.elements` records each applied `tolerance` and
+`within_tolerance`. Old saved float tolerances still work. Validation uses saved
+tolerances unless explicitly overridden, and does not need the original
+calibration file after generation has saved its values and SHA-256.
+
+`--tolerances-from` cannot be combined with either explicit tolerance option.
+A reference, model, bin, smoothing or radius mismatch is an error, not a bypass;
+recalibrate. Geometry, connectivity and pair-distance audits remain mandatory
+regardless of the tolerance values.
+
+### First 1CWP calibration
+
+Fifty replicates, seed 42, 4 A bins, no smoothing; means and suggested per-element
+limits (`2 * orientation p95`):
+
+| Element | Counting mean | Orientation mean | Placement mean | Suggested tolerance |
+|---|---:|---:|---:|---:|
+| C | 0.006668 | 0.035818 | 0.096589 | 0.0753 |
+| N | 0.013554 | 0.065827 | 0.126262 | 0.141 |
+| O | 0.013103 | 0.051661 | 0.078231 | 0.113 |
+| S | 0.072148 | 0.369778 | 0.779037 | 0.864 |
+| Total | 0.009210 | 0.044620 | 0.099487 | — |
+
+Across the nine v0.1.8 particles at 50 pushes:
+
+| Element | Error / orientation mean | Raw placement-to-orientation gap closed |
+|---|---:|---:|
+| C | 0.73-1.02 | 0.99-1.16 |
+| N | 1.46-1.71 | 0.23-0.50 |
+| O | 1.15-1.46 | 0.10-0.71 |
+| S | 0-2.30 | -0.18-1.90 |
+
+C already matches or beats that typical baseline; N has the largest remaining
+gap (about 0.030-0.047 normalized error),
+followed by O (0.008-0.024). Independent-atom fitting can still improve beyond a
+random-residue baseline. Mean mode effects for C and O are below pooled within-mode
+seed SD. Profile placement's mean N improvement is about **1.4 pooled seed SD**,
+or 0.075 orientation-mean units, but it reverses for one seed. Three seeds do not
+establish statistical significance or a universally superior placement mode.
+
+With sigma 1 A, self-error is 0.000156 overall and 0.001207 for S. Suggested
+limits are C=0.0767,N=0.140,O=0.113,S=0.843. All ten supplied benchmark particles
+pass standalone validation when their matching suggestions are explicitly loaded.
+That is validity under the selected `K=2, p95` rule, not independent experimental
+confirmation. No second complete experimental CCMV structure was supplied;
+A/B/C chain-label spread is reported separately. Full levels, generated ratios,
+gap closure, per-seed effects and validation results are retained under
+`calibration` in `benchmarks/1cwp_refinement.json`.
+
 ## Acceptance and reports
 
 JSON is mandatory. CSV profiles (`--csv`) and PNG plots (`--plot`) are optional.
@@ -767,16 +899,17 @@ The primary per-element profile error is:
 `sum(abs(generated_density - target_density) * shell_volume) / target_count`.
 Comparisons against the mapped original unsmoothed profile are also included.
 
-No calibrated profile/composition tolerances exist yet. Set `--profile-tolerance`
-and `--composition-tolerance` for operational acceptance. The former applies to
-each element; the latter allows relative count error with a one-atom rounding
-allowance. Missing tolerances produce `uncalibrated`; exceeding supplied soft
+No universal tolerances are applied by default. Set `--profile-tolerance` and
+`--composition-tolerance`, or explicitly load a matching calibration with
+`--tolerances-from`. Profile tolerance may be a scalar, per-element map or map
+with `*` fallback. Composition allows relative count error with a one-atom
+rounding allowance. Missing tolerances produce `uncalibrated`; exceeding supplied soft
 tolerances produces `approximate`. Both require `--allow-approximate` to save.
 **That flag never relaxes mandatory constraints.**
 
 | Exit code | Meaning |
 |---|---|
-| 0 | Analysis completed, or generation/validation valid within supplied tolerances. |
+| 0 | Analysis/calibration completed, or generation/validation valid within supplied tolerances. |
 | 1 | Input, search, validation or output failure. |
 | 2 | Approximate/uncalibrated result saved or verified; also argparse usage errors. |
 | 130 | Interrupted. |
@@ -819,10 +952,10 @@ volume scaling, distance fallback, global/internal connectivity, strict overlap,
 PDB rounding, construction modes, regular initialization, reproducibility,
 independent validation, diagnostics, large numbering, PNG/CSV and output rollback.
 
-Before a full-capsid release we still need the expanded 1CWP file, calibration of
-smoothing/tolerances, complete-capsid timing and memory measurements, convergence
-assessment, and an installed VMD for compatibility testing. Small controlled
-cases alone do not establish readiness at viral-capsid scale.
+Complete 1CWP benchmarks and reference-resampling calibrations are recorded
+above. Broader validation still needs independent experimental full-particle
+comparisons, more seeds and capsids/settings, and automated VMD compatibility
+checks. Reference-derived thresholds do not establish universal physical validity.
 
 A repeatable synthetic timing probe is available:
 

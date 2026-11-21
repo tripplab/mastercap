@@ -258,3 +258,57 @@ restrained S atoms or perfect S bin counts with faster geometry repair. The
 smoothed case has S error 0.001207 against a different target and is recorded
 separately. All outputs remain uncalibrated; the quality gates are explicit
 false values in revision04 rather than hidden by successful validity checks.
+
+Revision 05 adds profile-only calibration. analyze(compute_distances=False) keeps
+the identical selected reference, center, edges and smoothing path while omitting
+all distance inference/override logic. Calibration never changes input coordinates
+or invokes generation/repair. profile_errors uses count/volume densities and the
+same per-element L1 integral and atom-weighted total as profile_metrics; the nine
+v0.1.8 comparison errors reproduce the recorded metrics.
+
+Counting uses multinomial(N_reference, target*volume/target_count). Orientation
+computes each residue centroid with bincount and rotates only its offsets with
+independent Haar SO(3) matrices. Placement additionally permutes centroid radii
+across residues along their original directions. Reference counts are retained
+for resized targets too, so these baselines can include an inventory mismatch;
+there is no implicit remapping/rebuilding of a new reference. Means, population
+SD (ddof=0), percentiles and extrema are seeded and reproducible at fixed R.
+These model scales are not mathematical minima or experimental uncertainty.
+
+Experimental comparisons use their own all-protein geometric center, reference
+edges and both raw and shape-normalized errors. Shape divides by in-range count
+before rescaling to target count; actual/in-range counts remain explicit. Missing
+elements or zero support fail. Chain-label profiles use the reference center,
+require all labels nonempty and >=1000 atoms, scale to full target counts and
+report pairwise L1 spread separately. They do not raise suggestions automatically.
+Generated PDBs use generated=True; sibling reports bind hashes/settings/center.
+Ratios to zero means and nonpositive placement-orientation gaps are null with
+reasons. gap_closed is raw (may exceed 1); its capped counterpart is also recorded.
+
+Suggestions are ceil-to-three-significant-figures of K * floor statistic, raised
+by the largest explicit experimental shape error. Defaults are orientation,
+p95 and K=2; composition remains zero with the existing one-atom allowance.
+Nothing is applied implicitly. The profile tolerance parser normalizes scalar,
+per-element and wildcard forms to a dict and retains the original CLI string.
+Coverage is checked before search; acceptance annotates each element and keeps
+mandatory geometry dominant. Saved floats remain compatible. Calibration loading
+checks content identity, model, width, effective sigma, radii, edges and selection
+settings. Validation can reuse saved numeric tolerances without the calibration
+file, or explicitly load a matching new report; it never rewrites the original.
+
+Calibration outputs have a distinct _calibration suffix and use staged publish.
+A prefix owned by a generation report is rejected even with overwrite. All
+comparison/generated inputs and sibling reports are protected. CSV has fixed
+columns and uses shape for experimental rows, with raw errors in JSON. PNG uses
+independent log panels, population p05-p95 ranges/means and explicit zero display
+positions; no Total acceptance tolerance is invented.
+
+The first R=50 1CWP calibration finds orientation means C=.035818,N=.065827,
+O=.051661,S=.369778 and counting means .006668/.013554/.013103/.072148.
+The permutation placement total (.099487) differs from actual initialization
+(~.06); it is a distinct null model. All ten old particles pass with explicitly
+loaded K=2/p95 suggestions, while all mandatory audits remain independent.
+C/O mean mode effects are below within-mode seed spread; N profile improvement
+is ~1.4 pooled seed SD, with one paired reversal. The n=3 analysis is descriptive,
+not a significance claim. Full results and raw/capped gaps live in the benchmark
+JSON's calibration section. No second experimental full capsid was supplied.

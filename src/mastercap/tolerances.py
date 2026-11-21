@@ -33,6 +33,7 @@ def normalize_tolerances(value):
 
 
 def check_coverage(value,elements,warning=None):
+    elements=set(elements)
     normalized=normalize_tolerances(value)
     if normalized is None:
         return None

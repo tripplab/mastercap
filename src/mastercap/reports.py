@@ -174,6 +174,6 @@ def calibration_png(calibration):
                  yticks=range(5),yticklabels=['Counting','Orientation','Placement','Real variation (shape)','Generated'],ylim=(-.6,4.9))
         if any(v<=0 for v in values) or tolerance==0:
             axis.text(.99,.98,f'Zero values shown at {zero:.1g}',transform=axis.transAxes,ha='right',va='top',fontsize=7)
-        if axis.get_legend_handles_labels()[0]:axis.legend(fontsize=7,loc='lower right')
+        if axis.get_legend_handles_labels()[0]:axis.legend(fontsize=7,loc='best')
     stream=io.BytesIO();figure.savefig(stream,format='png',dpi=150)
     return stream.getvalue()
