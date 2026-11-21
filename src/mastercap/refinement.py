@@ -358,7 +358,7 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
     retained = proposals & ~(proposed & ~accepted)
     if safety_reverted_all or center_rejected:
         retained[:] = False
-    count = int(proposals.sum())
+    proposal_count = int(proposals.sum())
     undone = proposals & ~retained
     per_element = {e: {"accepted": int(retained[ix].sum()), "undone": int(undone[ix].sum()),
                        "undone_too_close": int(reasons["too_close"][ix].sum()),
@@ -367,15 +367,15 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
     by_pair = {name: len(indices) for name, indices in sorted(pair_rejections.items()) if indices}
     for e in per_element:
         per_element[e]["undone_too_close_by_pair"] = {
-            name: count for name, indices in sorted(pair_rejections.items())
-            if (count := int(np.count_nonzero(metadata.elements[np.fromiter(indices, dtype=int)] == e)))}
-    details = {"atoms_proposed": count, "atoms_accepted": int(retained.sum()),
-                   "atoms_undone": int(count-retained.sum()), "atoms_moved": int(accepted.sum()),
+            name: element_count for name, indices in sorted(pair_rejections.items())
+            if (element_count := int(np.count_nonzero(metadata.elements[np.fromiter(indices, dtype=int)] == e)))}
+    details = {"atoms_proposed": proposal_count, "atoms_accepted": int(retained.sum()),
+                   "atoms_undone": int(proposal_count-retained.sum()), "atoms_moved": int(accepted.sum()),
                    "proposed_moving_atoms": int(proposed.sum()),
                    "stationary_proposals": int(np.count_nonzero(proposals & ~proposed)),
                    "undone_by_reason": {name: int(mask.sum()) for name, mask in reasons.items()},
                    "undone_too_close_by_pair": by_pair,
-                   "acceptance_fraction": float(retained.sum()/count) if count else 1.0,
+                   "acceptance_fraction": float(retained.sum()/proposal_count) if proposal_count else 1.0,
                    "check_passes": passes, "expanded_undo_atoms": expanded,
                    "safety_reverted_all": safety_reverted_all, "center_rejected": center_rejected,
                    "per_element": per_element}
