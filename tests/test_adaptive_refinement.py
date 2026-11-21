@@ -10,7 +10,7 @@ from mastercap.cli import main
 from mastercap.constraints import validate_geometry
 from mastercap.generate import search
 from mastercap.model import Atom, MastercapError, Structure
-from mastercap.refinement import PushController, apply_radial_push, candidate_key
+from mastercap.refinement import AcceptanceController, PushController, apply_radial_push, candidate_key
 
 
 def metrics(c_error, s_error, total):
@@ -31,11 +31,12 @@ def test_selection_objective_can_prefer_total_over_sulfur():
 def test_partial_push_prefers_largest_mismatch_and_caps_requested_moves():
     force = np.zeros((10, 3))
     direction = np.tile([1.0, 0, 0], (10, 1))
-    details = apply_radial_push(force, np.ones(10), direction,
+    details, selected = apply_radial_push(force, np.ones(10), direction,
                                 {"C": np.arange(8), "S": np.array([8, 9])},
                                 {"C": np.arange(8)+2, "S": np.array([3, 5])},
                                 strength=100, max_step=0.05, fraction=0.25)
     assert np.array_equal(np.flatnonzero(np.linalg.norm(force, axis=1)), [6, 7, 9])
+    assert np.array_equal(np.sort(selected), [6, 7, 9])
     assert details["selected_atoms"] == details["atoms_pushed"] == 3
     assert details["max_requested_radial_move_angstrom"] <= 0.05
     assert np.max(np.linalg.norm(force, axis=1)) <= 0.05
@@ -97,7 +98,8 @@ def controlled_case(lower=0.1, all_inner=False):
 
 
 def controlled_search(source, edges, profiles, analysis, **kwargs):
-    with patch("mastercap.generate.initialize", return_value=[]), patch("mastercap.generate.characteristic_forces"):
+    kwargs.setdefault("consolidate_iterations", 0)
+    with patch("mastercap.generate.initialize", return_value=[]), patch("mastercap.generate.characteristic_forces", return_value={}):
         return search(source, analysis, edges, profiles, np.zeros(3), np.random.default_rng(42),
                        time_limit=30, max_iterations=500, **kwargs)
 
@@ -133,14 +135,15 @@ def test_large_push_rolls_back_and_does_not_mutate_best_candidate(mode):
     messages = []
     progress = []
     output, report = controlled_search(source, edges, profiles, analysis, mode=mode,
+                                       refine_acceptance="rollback", rollback_violation_fraction=0,
                                        refine_strength=1e6, refine_fraction=0.25, refine_patience=0,
                                        refine_updates=50, stage_progress=messages.append,
                                        progress=lambda i, g, m: progress.append((i, g)), progress_interval=100)
     assert output is not None
     assert report["rollback_count"] > 0
     assert report["refinement_strength_final"] < 1e6
-    assert report["termination"] == "refinement_stalled"
-    assert report["refinement_stop_limit"] == "strength_floor"
+    assert report["termination"] == "refinement_blocked"
+    assert report["refinement_stop_limit"] == "damage_independent_of_push"
     assert report["refinement_updates"] == report["rollback_count"]
     assert all(p["rollback"] and p["damage"]["distance_violations"] > 0 for p in report["push_history"])
     assert np.array_equal(source.xyz, original)
@@ -185,6 +188,7 @@ def test_final_broken_state_is_labeled_and_not_exported(tmp_path, small_pdb, cap
     assert main(["generate", "--input", str(small_pdb), "--output-prefix", str(prefix),
                  "--seed", "42", "--allow-approximate", "--no-smoothing", "--refine-strength", "1000000",
                  "--refine-max-step", "1", "--refine-fraction", "1", "--refine-patience", "0",
+                 "--refine-acceptance", "rollback", "--consolidate-iterations", "0", "--rollback-violation-fraction", "0",
                  "--progress-interval", "100"]) == 2
     output = capsys.readouterr().err
     assert "(final search state; not the exported candidate)" in output
@@ -212,3 +216,98 @@ def test_either_zero_budget_returns_first_feasible_geometry(setting):
     assert report["profile_updates"] == 0
     assert report["candidate_iteration"] == report["first_feasible_iteration"] == 0
     assert report["termination"] == "constraints_satisfied"
+
+
+@pytest.mark.parametrize("falling", [False, True])
+def test_damage_controller_distinguishes_independent_and_responsive_damage(falling):
+    controller = PushController(0.005, 10, 10000, [], violation_fraction=0)
+    xyz = np.zeros((2, 3))
+    for i in range(3):
+        controller.start(2*i, xyz, {"strength": controller.strength})
+        assert controller.observe(2*i+1, geometry(False, 100//2**i if falling else 100, 2), xyz)
+    assert controller.blocked is (not falling)
+    if not falling:
+        assert controller.strength == pytest.approx(0.005/4)
+        assert controller.blocked_evidence["reason"] == "damage_independent_of_push"
+
+
+def test_responsive_damage_can_still_reach_strength_floor():
+    controller = PushController(0.005, 10, 10000, [], violation_fraction=0)
+    xyz = np.zeros((2, 3))
+    for i in range(5):
+        controller.start(2*i, xyz, {"strength": controller.strength})
+        controller.observe(2*i+1, geometry(False, 1000//2**i, 2), xyz)
+    assert controller.stalled
+    assert not controller.blocked
+
+
+@pytest.mark.parametrize("improved", [False, True])
+def test_rollback_judges_recovered_profile_against_snapshot(improved):
+    history = []
+    controller = PushController(0.005, 10, 10000, history)
+    xyz = np.zeros((2, 3))
+    controller.start(0, xyz, {"strength": controller.strength}, (0.1, 0, 0, 0))
+    xyz += 0.1
+    assert not controller.observe(1, geometry(False, 1, 2), xyz)
+    restored = controller.observe(2, geometry(), xyz, (0.09 if improved else 0.11, 0, 0, 0))
+    assert restored is (not improved)
+    assert history[0]["outcome"] == ("recovered_improved" if improved else "recovered_worse")
+    assert np.allclose(xyz, 0.1 if improved else 0)
+
+
+def test_restored_snapshots_do_not_count_as_new_feasible_candidates():
+    source, edges, profiles, analysis = controlled_case()
+    _, report = controlled_search(source, edges, profiles, analysis, refine_acceptance="rollback",
+                                   refine_strength=1e-10, refine_updates=3, refine_patience=0)
+    assert report["restored_snapshot_iterations"] == [2, 4]
+    assert report["feasible_iterations"] == [0]
+    assert [r["iteration"] for r in report["best_history"]] == [0]
+    assert report["recoveries_worse"] == 3
+
+
+@pytest.mark.parametrize("fraction,expected", [(0.9, 0.00625), (0.6, 0.005), (0.4, 0.0035)])
+def test_acceptance_controller_targets_the_acceptance_band(fraction, expected):
+    controller = AcceptanceController(0.005, [])
+    controller.start(0, np.zeros((2, 3)), {"acceptance_fraction": fraction})
+    assert controller.strength == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("mode", ["independent", "residue"])
+def test_large_per_atom_push_preserves_geometry_and_seed_reproducibility(mode):
+    results = []
+    for _ in range(2):
+        source, edges, profiles, analysis = controlled_case(lower=1.59, all_inner=True)
+        output, report = controlled_search(source, edges, profiles, analysis, mode=mode,
+                                           refine_strength=1e6, refine_updates=3, refine_patience=0)
+        assert validate_geometry(output, np.zeros(3), edges, analysis.limits, mode=mode)["mandatory_pass"]
+        assert report["rollback_count"] == 0
+        assert any(p["atoms_undone"] > 0 for p in report["push_history"])
+        for p in report["push_history"]:
+            assert p["atoms_accepted"]+p["atoms_undone"] == p["atoms_proposed"]
+            assert p["damage"]["mandatory_pass"]
+            assert p["profile_before"] and p["profile_after"]
+            assert set(p["force_components"]) == {"repair", "bridges", "radial_clip", "centering", "radial_push", "nearest_neighbor"}
+        json.dumps(report)
+        results.append((output.xyz.copy(), report["push_history"]))
+    assert np.array_equal(results[0][0], results[1][0])
+    assert results[0][1] == results[1][1]
+
+
+@pytest.mark.parametrize("option,value", [
+    ("--refine-slack", "-1"), ("--refine-slack", "nan"), ("--consolidate-iterations", "-1"),
+    ("--rollback-violation-fraction", "-0.1"), ("--rollback-violation-fraction", "1.1"),
+    ("--rollback-component-limit", "0"), ("--refine-acceptance", "invalid"), ("--neighbor-forces", "invalid")])
+def test_new_options_reject_invalid_values_without_reading_input(option, value):
+    with pytest.raises(SystemExit) as stopped:
+        main(["generate", "--input", "missing.pdb", "--output-prefix", "out", option, value])
+    assert stopped.value.code == 2
+
+
+@pytest.mark.parametrize("setting", [
+    {"refine_slack": -1}, {"refine_slack": float("nan")}, {"consolidate_iterations": -1},
+    {"rollback_violation_fraction": -0.1}, {"rollback_violation_fraction": 1.1},
+    {"rollback_component_limit": 0}, {"refine_acceptance": "invalid"}])
+def test_library_rejects_new_invalid_settings(setting):
+    source, edges, profiles, analysis = controlled_case()
+    with pytest.raises(MastercapError):
+        controlled_search(source, edges, profiles, analysis, **setting)

@@ -242,23 +242,96 @@ validation remains independent.
 | `--refine-max-step` | 0.05 A | Cap on the requested radial profile contribution per selected atom. |
 | `--refine-fraction` | 0.2 | Fraction per element to push, rounding up; prioritize largest radial mismatches. |
 | `--refine-recovery-limit` | 10 | Repair updates allowed after damage; 0 restores immediately if the next state is invalid. |
+| `--neighbor-forces` | `scaled` | Nearest-neighbor contributions: `scaled` follows push controls, `off` disables them, `fixed` uses coefficient 0.002 on all atoms. |
+| `--refine-slack` | 0.02 A | Target distance/contact margin during consolidation and neighbor targeting; final validation limits remain unchanged. |
+| `--consolidate-iterations` | 10 | Slack-building updates before profile pushes; 0 disables; at most 3 restarts if geometry breaks. |
+| `--refine-acceptance` | `per-atom` | Reject conflicting atom moves before committing; rigid mode rejects whole residues. `rollback` permits repair and snapshot recovery. |
+| `--rollback-violation-fraction` | 0.05 | Immediate rollback above this distance-violating-pair count divided by atom count; range [0, 1]. |
+| `--rollback-component-limit` | 5000 | Immediate rollback at this many components. |
+
+Before profile pushes, consolidation tries to build `--refine-slack` on both
+minimum distances and contact distances. Narrow feasible windows use one third
+of their width instead. It keeps radial clipping and centering, applies no
+profile or nearest-neighbor forces, and ends after the update allowance or once
+both weakest gaps reach half the requested slack. Broken geometry returns to
+repair; after three restarts, refinement proceeds from the next feasible state.
+Consolidation is best effort, so inspect the recorded gaps rather than assuming
+every pair gained the requested slack. The optional iteration cap includes this
+phase. A zero refinement budget stops at first feasibility before any slack update.
 
 All atoms of each element are radially ranked against deterministic,
 volume-aware quantiles; only the selected fraction receives radial contributions.
 The requested radial move is `clip(strength * radial_error, -max_step, max_step)`.
-Geometry-repair forces are still computed first on the same update. Nearest-neighbor
-`characteristic_forces` is unchanged (coefficient 0.002): it shares the feasible
-push update and the overall 0.2 A position-update cap, but is not scaled by the
-radial strength or limited by the radial-only 0.05 A cap. Rigid projection can
-also redistribute moves. Damage histories measure the resulting combined update.
+With
+`--neighbor-forces scaled`, nearest-neighbor contributions use coefficient
+`0.002 * (current_strength / starting_strength)` and affect only atoms selected
+by the radial push. Their accumulated vector per atom is capped at half
+`--refine-max-step`, independently of the radial contribution. `off` skips these
+contributions entirely; `fixed` keeps coefficient 0.002 and all-atom coverage
+without this additional cap. Both active modes clip pair targets between
+`lower + refine_slack` and `sum_of_vdw_radii - overlap_margin - refine_slack`, skipping
+empty windows. Thus `fixed` preserves the old coefficient and coverage but also
+includes the target safety fix. Target clipping alone does not guarantee that
+the combined coordinate update is feasible. The overall 0.2 A update cap and
+rigid projection still apply. Each push records scalar nearest-neighbor move
+statistics under `push_history[*].neighbor_forces`.
 
-One full coordinate snapshot is saved before each push, including in rigid-residue
-mode. If the next checked state stays feasible, strength increases by 1.25, capped
-at four times its starting value. Small damage keeps the strength and allows
-repair. A distance-violating pair count greater than 0.0005 times the atom count,
-or at least 50 components, triggers rollback. Failure to recover within the recovery allowance
-also restores the snapshot. Rollback restores only coordinates, halves strength,
-and leaves iteration counts, history and the best candidate intact. Falling below
+The default acceptance path builds a separate radial/neighbor trial update,
+applies the overall cap and rigid projection, and rounds it to PDB precision.
+It rejects moves that violate a guarded minimum distance (lower + 0.003 A),
+break any existing contact (radius sum - margin - 0.003 A), or leave the radial
+bounds. It also checks new nearby pairs and mixed trial/restored positions.
+Offenders are reverted for up to three passes, then with their direct neighbors;
+a remaining conflict restores the complete trial as a safety fallback. In rigid
+mode every rejection restores a complete residue. Preserving existing edges
+preserves global and internal residue connectivity without recomputing components
+inside the trial check. The next normal iteration and final PDB reread still
+validate geometry independently. A center error above 1 A rejects the whole trial.
+
+Strength grows by 1.25 above 85% acceptance and shrinks by 0.7 below 50%, bounded
+above by four times its starting value. Acceptance counts selected proposals,
+including feasible proposals that round to no motion; rigid mode expands them
+to complete residues. Physically moving proposals and retained moves are reported
+separately. An entirely stationary trial still consumes a push, and patience
+can stop it. Zero-accepted proposals also consume a push. Repair,
+radial clipping and centering are not added to feasible per-atom trial updates.
+
+Run the full-reference benchmark with the new defaults:
+
+```bash
+mastercap generate --input ./1cwp_full.vdb --output-prefix results/revision \
+  --mode independent --distribution regular --bin-width 4 --no-smoothing \
+  --time-limit 600 --seed 42 --allow-approximate --csv --plot --overwrite
+```
+
+The historical Step 1 off/fixed comparison used commit `df200e5`, before
+consolidation and per-atom acceptance. It requires the complete 214,440-protein-atom
+reference. Uncalibrated successful generation returns exit code 2. Benchmark
+measurements and the reference checksum are retained in `benchmarks/1cwp_refinement.json`.
+
+On the complete 1CWP reference (seed 42, regular initialization, 4 A bins,
+no smoothing, 600 s budget), version 0.1.5 reached total error **0.060828**
+with **57.6%** mean proposal acceptance and **zero rollbacks** in **399.7 s**.
+All refinement states after consolidation were feasible. Search stopped after
+32 pushes on patience: `termination=refinement_stalled` with
+`refinement_stop_limit=refine_patience`, preserving the existing termination
+mapping; it did not hit the strength floor. The independently reread PDB passed
+mandatory checks. Consolidation exhausted its three restarts, so its target
+slack was only partially achieved. Sulfur error remained 0.837; total-error
+selection does not guarantee improvement for each element. These measurements
+are a reproducible benchmark, not calibrated scientific acceptance tolerances.
+
+With `--refine-acceptance rollback`, a full coordinate snapshot is saved before
+each push, including rigid residues. Damage below the configured disaster limits
+gets up to `--refine-recovery-limit` repair updates. Recovery is compared against
+the snapshot's complete ranking key: an improved state is retained; an equal or
+worse state restores the snapshot and halves strength. Immediate recovery with
+improvement grows strength by 1.25. A disaster or exhausted repair allowance also
+restores and halves. Restored snapshots are tracked separately and cannot count
+again as new feasible/best candidates. If strength falls by at least fourfold
+but damage falls by less than 25%, the controller stops halving and terminates
+with `refinement_blocked` / `damage_independent_of_push`, logging the evidence.
+The best candidate is always a separate rounded copy. Falling below
 1/16 of starting strength stops with `refinement_stalled`; no push uses that
 below-floor strength. This is a controller stop, not proof of infeasibility.
 
@@ -308,10 +381,10 @@ with its subphases. `search.elapsed_seconds` measures only the reported attempt'
 repair search; `search.preparation_seconds` measures its initialization/metadata
 setup. `timings_seconds.search` includes both attempts when fallback occurs.
 `search.termination` is `time_limit`, `iteration_limit`, `constraints_satisfied`,
-`refinement_complete`, or `refinement_stalled`. Completion means a push/optional
+`refinement_complete`, `refinement_stalled`, or `refinement_blocked`. Completion means a push/optional
 iteration budget was used, not that scientifically calibrated criteria passed;
 `refinement_stop_limit` identifies the budget or stall condition. Checks prioritize
-supplied quality acceptance/first-feasible stopping, refinement budgets, stalling,
+supplied quality acceptance/first-feasible stopping, refinement budgets, blocking, stalling,
 time limit, then iteration limit. `iterations` is the last evaluated search
 iteration, including rollback-only iterations; `candidate_iteration` identifies
 the selected feasible candidate, which can precede termination. Search may end
@@ -344,15 +417,36 @@ actual profile updates and the selected candidate's iteration. Candidate geometr
 and metrics describe the selected feasible output, which may precede the final
 search iteration.
 
-`feasible_iterations` lists every feasible check. `best_history` records each
+`feasible_iterations` lists feasible checks excluding restored snapshot repeats;
+`restored_snapshot_iterations` lists those repeats separately. `best_history` records each
 replacement, the four ranking components and every element error. New-best INFO
 messages are independent of `--progress-interval`. `initial_metrics` stores the
 iteration-0 total and per-element metrics. `push_history` records push iteration,
 strength, selected/nonzero-pushed counts, mean/max absolute requested radial move,
 the next evaluated state's damage, recovery, strength changes and rollbacks.
 `recovery_iterations` excludes the push itself: 0 means the next state was already
-feasible. Rolled-back/unrecovered pushes have no completed recovery value and are
-excluded from `median_recovery_iterations`. Snapshot arrays are never serialized.
+feasible. Unrecovered pushes have no completed recovery value. Recovery followed
+by a worse-profile rollback still records its completed recovery length.
+Each push contains `profile_before`/`profile_after`, `force_components` (mean/max
+repair, bridges, radial clip, centering, radial push and neighbor contributions
+before caps/projection), `applied_force_components`, and `actual_move` after
+projection/checking. Per-atom records include proposed/accepted/undone counts,
+reasons, passes and acceptance fraction. Reason counts can overlap, and undoing
+a whole residue or neighbors can undo additional atoms. Rollback records keep
+the first post-push `profile_after` and, when recovered, `profile_recovered`.
+Histories contain scalar summaries,
+never coordinate snapshots or atom-index arrays.
+
+`slack_at_first_feasible` and `slack_after_consolidation` report minimum and 5th
+percentile gaps to distance/contact limits and counts within 0.005 A of them.
+`acceptance_mode`, `committed_pushes`, `mean_acceptance_fraction`,
+`recoveries_improved`, `recoveries_worse`, `repair_attempts` and `blocked_evidence`
+support the final console summary. A committed push has at least one retained
+atom move, or an improved recovery in rollback mode; zero-move attempts still
+consume the push budget. In push records, `atoms_proposed = atoms_accepted + atoms_undone`
+counts proposals; `proposed_moving_atoms`, `atoms_moved` and `stationary_proposals`
+distinguish physical motion from proposals below PDB rounding resolution.
+The console says `0 attempted` when no post-push repair was attempted.
 
 `refinement_updates` equals `profile_updates` and `len(push_history)`;
 `refinement_steps` still counts iterations since first feasible geometry. Final
