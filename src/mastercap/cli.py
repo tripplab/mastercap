@@ -17,7 +17,8 @@ from . import __version__
 from .analysis import (analyze, target_profiles, distance_statistics, parse_limit_override,
                        resolve_limit_overrides)
 from .constraints import (acceptance, profile_metrics, validate_geometry,
-                          connectivity_audit, require_connectivity_audit)
+                          connectivity_audit, require_connectivity_audit,
+                          pair_distance_audit, require_pair_distance_audit)
 from .generate import select_inventory, search, residue_transforms
 from .model import Atom, MastercapError
 from .pdbio import download, read_pdb, pdb_text
@@ -44,6 +45,17 @@ def final_connectivity_check(structure, margin, geometry, report):
     require_connectivity_audit(audit, geometry)
     LOG.info("Success! Final connectivity audit: 0 isolated atoms, 1 component, 0 disconnected residues (%d atoms, %d edges)",
              audit["atom_count"], audit["edge_count"])
+
+
+
+def final_pair_distance_check(structure, limits, report):
+    audit = pair_distance_audit(structure, limits)
+    report['pair_distance_audit'] = audit
+    require_pair_distance_audit(audit)
+    sulfur = audit['pairs'].get('S-S', {})
+    if sulfur.get('minimum_distance_angstrom') is not None:
+        names = ' / '.join(f"{a['residue_name']} {a['residue_number']} {a['atom_name']}" for a in sulfur['closest_atoms'])
+        LOG.info('Closest S-S: %.3f A (%s)',sulfur['minimum_distance_angstrom'],names)
 
 
 class DetailedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
@@ -94,9 +106,9 @@ Input and output:
   ignored; HETATM and nonprotein records are excluded; alternate positions fail.
   --input and --id are mutually exclusive. Downloads use VIPERdb with TLS checks
   by default; --no-check-certificate explicitly disables them for downloads.
-  Pair limits default to S-S=steric: a pooled positive floor replaces sulfur's
+  Pair limits default to S-S=steric: an element-derived nonbonded floor replaces sulfur's
   symmetry spacing statistic. Repeat --pair-limit-override PAIR=VALUE for a
-  positive A value, steric or reference; S-S=reference restores old behavior.
+  positive A value, steric, pooled or reference; S-S=reference restores old behavior.
   Writes PREFIX.json and, when requested, PREFIX_profiles.csv / .png; no PDB.
   Element-inference and other reference warnings stay in JSON, with one terminal
   summary (suppressed by --quiet).""",
@@ -145,6 +157,10 @@ Workflow and defaults:
   an accumulated per-atom cap of half --refine-max-step; off disables these
   contributions; fixed uses coefficient 0.002 on all atoms without that cap.
   Both active modes guard targets inside the distance/contact window.
+  S-S=steric derives a ratio from measured non-overridden pairs containing S;
+  pooled retains the old global formula but all new overrides must clear the
+  covalent floor (0.9 times the covalent-radius sum). Saved validation uses
+  recorded numeric limits, never the current meaning of a mode name.
   S-S=steric is the default distance override; measured neighbor statistics
   remain unchanged and every applied limit is recorded. S-S=reference restores
   the old sulfur spacing limit. Optional --sulfur-residue-placement profile
@@ -199,6 +215,11 @@ Smoothing and radial resolution:
   applies: --bin-width 4 is coarser than 1 A, even without Gaussian smoothing.
   Generation seeks the target under geometric/connectivity constraints; neither
   setting guarantees an exact match or establishes scientifically valid tolerances.
+  Final independent connectivity and inter-residue pair-distance audits run on
+  the reread PDB. Sub-covalent pairs fail with atom identifiers (expected peptide
+  links are excluded from that floor check). Compare errors_at_push at equal
+  push counts; use --time-limit 1800 for benchmark runs. Time-limited results
+  depend on machine speed even with a fixed seed.
 """
 
 EXIT_HELP = """
@@ -271,7 +292,7 @@ def parser():
                                  formatter_class=DetailedHelpFormatter,
                                  epilog=COMMAND_EXAMPLES[name]+(SMOOTHING_HELP if name != "validate" else "")+"\n"+EXIT_HELP)
         result.command_parsers.append(command)
-        command.add_argument("--pair-limit-override", action=PairLimitAction, metavar="PAIR=VALUE", help="Repeatable positive A/steric/reference distance override; default S-S=steric. Use S-S=reference for old spacing. Validation always applies saved report overrides")
+        command.add_argument("--pair-limit-override", action=PairLimitAction, metavar="PAIR=VALUE", help="Repeatable positive A/steric/pooled/reference distance override; steric uses element-derived measured ratios; all new overrides obey the covalent floor; default S-S=steric. Use S-S=reference for old spacing. Validation applies saved numeric override values")
         source = command.add_mutually_exclusive_group(required=True)
         source.add_argument("--input", type=Path, help="Local expanded .pdb/.vdb, optionally gzip compressed; required alternative to --id")
         source.add_argument("--id", help="Four-character VIPERdb identifier, e.g. 1cwp; required alternative to --input")
@@ -300,7 +321,9 @@ def parser():
             command.add_argument("--outer-radius", type=finite_positive, help="Outer atom-center radius in A; overrides do not change local density targets")
             command.add_argument("--center", choices=("reference", "origin"), default="reference", help="Target center: reference coordinate mean or origin (0, 0, 0)")
             command.add_argument("--mode", choices=("independent", "residue"), default="independent", help="Move individual atoms (independent) or preserve observed residue geometry with rigid moves (residue)")
-            command.add_argument("--sulfur-residue-placement", choices=("off", "profile"), default="off", help="Optionally anchor the first S of each S-containing residue to the reference S profile at initialization; regular uses bin midpoints. Repair-only spring; copies reference S shells by design")
+            command.add_argument("--sulfur-residue-placement", choices=("off", "profile", "reference"), default="off", help="Optionally anchor the first S per S-containing residue: profile uses target quantiles (regular: bin midpoints); reference uses its own reference atom radius without quantization, requires radii within target bounds. Spacing swaps; repair-only dead-zone spring; refinement preserves assigned bins")
+            command.add_argument("--sulfur-anchor-tolerance", type=finite_nonnegative, default=1.5, help="Repair-only S radial dead-zone half-width in A, clipped inside its assigned bin; 0 holds exact radius. Refinement forbids leaving the assigned bin")
+            command.add_argument("--no-sulfur-anchor-spring", action="store_true", help=argparse.SUPPRESS)
             command.add_argument("--distribution", choices=("random", "regular"), default="random", help="Random isotropic or regular spherical-layer initialization; repair may move initial positions")
             command.add_argument("--seed", type=int, help="Nonnegative random seed for reproducible generation")
             command.add_argument("--max-iterations", type=int, default=1000, help="Maximum repair steps per attempt; nonnegative, provisional")
@@ -476,6 +499,8 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                                          refine_min_step=args.refine_min_step,
                                          refine_selection=args.refine_selection,
                                          sulfur_residue_placement=args.sulfur_residue_placement,
+                                         sulfur_anchor_tolerance=args.sulfur_anchor_tolerance,
+                                         sulfur_anchor_spring=not args.no_sulfur_anchor_spring,
                                          consolidate_noncontact_slack=args.consolidate_noncontact_slack,
                                          consolidate_target=args.consolidate_target,
                                          reconsolidate_below=args.reconsolidate_below,
@@ -536,6 +561,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
         # Use actual PDB groups to check serialization did not merge residues.
         geometry = validate_geometry(reread, center, edges, analysis.limits, args.overlap_margin, mode)
         final_connectivity_check(reread, args.overlap_margin, geometry, report)
+        final_pair_distance_check(reread, analysis.limits, report)
         metrics = profile_metrics(reread, center, edges, profiles, analysis.original)
         status = acceptance(geometry, metrics, args.profile_tolerance, args.composition_tolerance)
         report.update({"geometry": geometry, "metrics": metrics, "status": status})
@@ -594,7 +620,11 @@ def validate_command(args, source, started, names):
         options["pair_limit_overrides"] = ["S-S=reference"]
         LOG.info("Legacy report has no distance-limit override record; using reference limits")
     else:
-        options["pair_limit_overrides"] = saved["configuration"].get("pair_limit_override", options.get("pair_limit_overrides"))
+        options["saved_limit_overrides"] = saved['analysis']['distance_limit_overrides']
+        for entry in options['saved_limit_overrides']:
+            if entry['mode'] == 'steric' and 'ratio' not in entry:
+                LOG.warning('Saved %s override %.3f A predates the covalent floor; structure may contain sub-contact %s pairs',
+                            entry['pair'],entry['new_value'],entry['pair'])
     analysis = analyze(read_pdb(source, saved["analysis"]["reference"]["model"]), **options, progress=LOG.info)
     if analysis.structure.provenance["sha256"] != saved["analysis"]["reference"]["sha256"]:
         raise MastercapError("Reference SHA-256 does not match the generation report")
@@ -621,6 +651,7 @@ def validate_command(args, source, started, names):
     geometry = validate_geometry(particle, center, edges, analysis.limits, config["overlap_margin"], saved["effective_mode"])
     audit_report = {}
     final_connectivity_check(particle, config["overlap_margin"], geometry, audit_report)
+    final_pair_distance_check(particle, analysis.limits, audit_report)
     metrics = profile_metrics(particle, center, edges, profiles, analysis.original)
     status = acceptance(geometry, metrics, config["profile_tolerance"], config["composition_tolerance"])
     report = base_report(args, started)

@@ -125,3 +125,42 @@ def test_final_audit_disagreement_blocks_pdb_even_with_allow_approximate(tmp_pat
     assert diagnostic['connectivity_audit']['isolated_atoms'] == 1
     assert 'serial 1' in diagnostic['error']
     assert 'disagrees with validate_geometry' in capsys.readouterr().err
+
+
+def test_pair_audit_names_subcovalent_sulfur_atoms():
+    from mastercap.constraints import pair_distance_audit, require_pair_distance_audit
+    from mastercap.model import Atom,Structure,MastercapError
+    structure=Structure([Atom('SG','S','CYS',0,{'serial':17,'residue_number':'51'}),
+                         Atom('SD','S','MET',1,{'serial':29,'residue_number':'120'})],np.array([[0.,0,0],[1.39,0,0]]))
+    audit=pair_distance_audit(structure,{('S','S'):1.371})
+    assert audit['below_covalent_floor_count'] == 1
+    assert audit['below_limit_count'] == 0
+    with pytest.raises(MastercapError,match=r'17 SG CYS.*29 SD MET'):
+        require_pair_distance_audit(audit)
+
+
+def test_pair_audit_peptide_exception_is_specific():
+    from mastercap.constraints import pair_distance_audit
+    from mastercap.model import Atom,Structure
+    atoms=[Atom('C','C','ALA',0,{'chain':'A','segment':0,'residue_number':'1'}),
+           Atom('N','N','GLY',1,{'chain':'A','segment':0,'residue_number':'2'})]
+    structure=Structure(atoms,np.array([[0.,0,0],[1.30,0,0]]))
+    assert pair_distance_audit(structure,{('C','N'):1.2})['below_covalent_floor_count'] == 0
+    atoms[1].origin['residue_number']='3'
+    assert pair_distance_audit(structure,{('C','N'):1.2})['below_covalent_floor_count'] == 1
+    atoms[1].origin.update(residue_number='2',segment=1)
+    assert pair_distance_audit(structure,{('C','N'):1.2})['below_covalent_floor_count'] == 1
+
+
+def test_pair_audit_minima_match_brute_force():
+    from itertools import combinations_with_replacement
+    from mastercap.constraints import pair_distance_audit
+    from mastercap.model import Atom,Structure
+    rng=np.random.default_rng(7)
+    elements=np.array(['C','N','O','S']*5)
+    structure=Structure([Atom(e,e,'ALA',i//4) for i,e in enumerate(elements)],rng.normal(size=(20,3))*10)
+    audit=pair_distance_audit(structure,{})
+    for a,b in combinations_with_replacement(sorted(set(elements)),2):
+        distances=[np.linalg.norm(structure.xyz[i]-structure.xyz[j]) for i in np.flatnonzero(elements==a)
+                   for j in np.flatnonzero(elements==b) if structure.atoms[i].residue != structure.atoms[j].residue]
+        assert audit['pairs'][a+'-'+b]['minimum_distance_angstrom'] == pytest.approx(min(distances))

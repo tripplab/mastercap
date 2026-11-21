@@ -83,11 +83,14 @@ def bin_inventory(radial, element_indices, edges, profiles):
 
 
 def apply_crossing_push(force, radial, direction, element_indices, profiles, edges,
-                        strength, max_step, fraction, min_step=0.002, blocked=None):
+                        strength, max_step, fraction, min_step=0.002, blocked=None, anchor_bins=None):
     """Reserve adjacent-bin quotas, then drift remaining atoms toward useful edges."""
     bins, inventory = bin_inventory(radial, element_indices, edges, profiles)
     blocked = np.zeros(len(radial), dtype=bool) if blocked is None else blocked
     used = np.zeros(len(radial), dtype=bool)
+    anchor_target = np.full(len(radial), -1, dtype=int)
+    if anchor_bins is not None:
+        anchor_target[anchor_bins[0]] = anchor_bins[1]
     selected, absolute, per_element = [], [], {}
     for e, indices in element_indices.items():
         _, _, balance = inventory[e]
@@ -137,11 +140,17 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
             requested.extend(move.tolist())
             used[take] = True
         chosen, requested = np.asarray(chosen, dtype=int), np.asarray(requested, dtype=float)
+        destination = radial_bins(radial[chosen]+requested, edges)
+        bad_anchor = (anchor_target[chosen] >= 0) & (destination != anchor_target[chosen])
+        anchor_rejected = int(bad_anchor.sum())
+        crossing_count -= int(bad_anchor[:crossing_count].sum())
+        chosen, requested = chosen[~bad_anchor], requested[~bad_anchor]
         force[chosen] += requested[:, None]*direction[chosen]
         selected.append(chosen)
         absolute.append(np.abs(requested))
         per_element[e] = {"selected": len(chosen), "crossing_proposals": crossing_count,
-                          "drift_proposals": len(chosen)-crossing_count}
+                          "drift_proposals": len(chosen)-crossing_count,
+                          "anchor_bin_selection_rejections": anchor_rejected}
     moves = np.concatenate(absolute) if absolute else np.array([])
     chosen = np.concatenate(selected) if selected else np.array([], dtype=int)
     return {"strength": float(strength), "selected_atoms": len(chosen),
@@ -249,7 +258,8 @@ def classify_stall(history, patience):
 
 
 def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
-                 mode="independent", max_step=0.05, selected_indices=None, return_undone=False):
+                 mode="independent", max_step=0.05, selected_indices=None, return_undone=False,
+                 anchor_bins=None):
     """Reject conflicting moved atoms/residues while retaining every old contact.
 
     Candidate pairs cover trial/trial AND trial/snapshot combinations, since
@@ -290,13 +300,13 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
                     collect(source, (bi, positions[bi]), bound)
     pairs = np.unique(np.vstack(blocks), axis=0)
     contacts = local["overlap_edges"]
-    lower = metadata.lower_matrix[metadata.codes[pairs[:, 0]], metadata.codes[pairs[:, 1]]]
+    lower = metadata.pair_lower_bounds(pairs)
     upper = metadata.radii[contacts].sum(axis=1)-margin-0.003
     eligible = np.ones(len(pairs), dtype=bool)
     if mode == "residue":
         eligible &= metadata.residues[pairs[:, 0]] != metadata.residues[pairs[:, 1]]
     reasons = {name: np.zeros(len(snapshot), dtype=bool)
-               for name in ("too_close", "contact_broken", "out_of_bounds")}
+               for name in ("too_close", "contact_broken", "out_of_bounds", "anchor_bin")}
     pair_rejections = {}
 
     def offenders():
@@ -328,6 +338,11 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
             reject[undo] = True
         radial = np.linalg.norm(trial-center, axis=1)
         outside = moving & ((radial < edges[0]) | (radial > edges[-1]))
+        if anchor_bins is not None:
+            ix, bins = anchor_bins
+            wrong = ix[moving[ix] & (radial_bins(radial[ix], edges) != bins)]
+            reasons['anchor_bin'][wrong] = True
+            reject[wrong] = True
         reasons["out_of_bounds"] |= outside
         reject |= outside
         reject &= moving
@@ -528,3 +543,23 @@ class PushController:
         if self.pending is not None:
             self.pending[0]["outcome"] = "unrecovered_at_stop"
             self.pending = None
+
+
+def errors_at_push(best_history, push_history):
+    """Best feasible errors after equal numbers of attempted pushes (not time)."""
+    reached = len(push_history)
+    checkpoints = sorted({n for n in (10,20,30,40,50,reached) if n <= reached})
+    result = {}
+    for count in checkpoints:
+        eligible = []
+        for record in best_history:
+            updates = record.get('profile_updates')
+            if updates is None:
+                updates = sum(push['iteration'] < record['iteration'] for push in push_history)
+            if updates <= count:
+                eligible.append(record)
+        if eligible:
+            best = eligible[-1]
+            result[str(count)] = {k: best[k] for k in ('iteration','total_profile_error','element_errors')}
+            result[str(count)]['push_count'] = count
+    return result
