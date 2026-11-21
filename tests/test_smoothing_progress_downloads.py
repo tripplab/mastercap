@@ -98,7 +98,9 @@ def test_validation_plot_honors_no_smoothing_in_legacy_report(tmp_path, small_pd
                   "refine_updates", "refine_patience", "refine_strength", "refine_max_step",
                   "refine_fraction", "refine_recovery_limit", "neighbor_forces", "refine_slack",
                   "consolidate_iterations", "refine_acceptance", "rollback_violation_fraction",
-                  "rollback_component_limit"):
+                  "rollback_component_limit", "refine_strength_control", "refine_min_step",
+                  "consolidate_target", "reconsolidate_below", "reconsolidate_every",
+                  "reconsolidate_iterations", "refine_selection"):
         report["configuration"].pop(field)
     report_path.write_text(json.dumps(report))
     settings = []
@@ -144,7 +146,11 @@ def test_stage_messages_precede_warning_and_show_refinement(tmp_path, small_pdb,
     assert report["geometry"]["mandatory_pass"]
 
 
-@pytest.mark.parametrize("option,value", [("--progress-interval", "0"), ("--refine-iterations", "-1")])
+@pytest.mark.parametrize("option,value", [("--progress-interval", "0"), ("--refine-iterations", "-1"),
+    ("--refine-min-step", "-1"), ("--refine-min-step", "nan"), ("--consolidate-target", "1.1"),
+    ("--reconsolidate-below", "-1"), ("--reconsolidate-below", "1.1"),
+    ("--reconsolidate-every", "-1"), ("--reconsolidate-iterations", "-1"),
+    ("--refine-strength-control", "invalid"), ("--refine-selection", "invalid")])
 def test_invalid_progress_and_refinement_fail_before_input(option, value, capsys):
     with pytest.raises(SystemExit) as stopped:
         main(["generate", "--input", "missing.pdb", "--output-prefix", "out", option, value])
@@ -175,7 +181,8 @@ def test_uncalibrated_refinement_improves_element_profile_and_keeps_geometry():
         _, initial = search(source.copy(), analysis, edges, profiles, np.zeros(3), np.random.default_rng(42),
                             refine_iterations=0)
         result, refined = search(source.copy(), analysis, edges, profiles, np.zeros(3), np.random.default_rng(42),
-                                  refine_updates=150, refine_patience=0, selection_objective="worst-element")
+                                  refine_updates=150, refine_patience=0, selection_objective="worst-element",
+                                  refine_strength_control="acceptance", refine_selection="mismatch")
     assert result is not None
     assert refined["geometry"]["mandatory_pass"]
     assert refined["status"] == "uncalibrated"

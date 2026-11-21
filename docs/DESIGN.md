@@ -48,18 +48,38 @@ atom-weighted total error, then mean element error, then maximum, then count
 difference; `worst-element` restores maximum/mean/total/count ranking. The helper
 and controller live in `refinement.py`; noise-aware selection is not implemented.
 
-Use deterministic volume-aware radial quantiles, rank all atoms, and push the
-largest-mismatch fraction per element (default 0.2). Radial strength starts at
-0.005 and requested radial moves are capped at 0.05 A. Repair forces are computed
-before profile contributions in the rollback path. First feasibility starts
-best-effort consolidation: up to 10 updates build 0.02 A distance/contact slack,
-using strengths 0.3/0.15 and one-third-window guards when the window is narrow.
-Radial clipping and centering continue. No profile/neighbor force is applied.
-Broken geometry returns to repair; at most three consolidation restarts are
-allowed. Record minimum/5th-percentile gaps and counts within 0.005 A at first
-feasibility and after consolidation. Final validation rules do not use slack.
+Default crossing selection computes integer bin counts and target counts scaled
+to each element's inventory. Reserve adjacent surplus/deficit crossing quotas,
+rounded down, preferring the nearest atoms. Request the edge distance plus
+0.002 A, capped at 0.05 A. Drift remaining surplus atoms toward useful edges.
+Crossing plus drift uses at most floor(0.2*N_element) atoms and skips the previous
+push's rejected mask. The mask remains private. Mismatch mode retains the v0.1.5
+volume-quantile ranking and rounds its selection count up.
 
-Nearest-neighbor contributions run in the feasible refinement block. The default `scaled` mode uses coefficient
+Radial strength is fixed at 0.005 by default. Gain control adjusts only after
+next-iteration primary profile errors are known: two non-improving pushes reduce
+strength by 0.7; a gain with >85% acceptance grows it by 1.25. Acceptance control
+keeps v0.1.5 feedback. Both adaptive modes cap at 4x and stall below 1/16 of
+starting strength; fixed mode does not shrink. Eligible nonzero drift/mismatch
+requests have a 0.002 A minimum before the maximum-step clip. The explicit
+rollback path keeps its independent damage controller.
+
+First feasibility starts checked consolidation: up to 10 updates build 0.02 A distance/contact slack,
+using strengths 0.3/0.15 and one-third-window guards when the window is narrow.
+Use a separate accumulated force capped at slack/2 per atom, rigid projection,
+PDB rounding and accept_trial. It applies no repair/profile/neighbor/centering
+contributions and consumes no profile pushes. After at least one update, end
+when each near-limit count is <=0.001*N, combined count improves <5%, or the
+episode budget ends. Unexpected broken geometry logs a warning; three restarts
+are a safety net. Restore slack below 70% acceptance or every 10 pushes, with
+at least two pushes between episodes and up to three checked updates each.
+Both triggers can be disabled. Final validation rules do not use slack.
+
+Nearest-neighbor contributions are off by default. The required reporting-only
+1CWP A/B comparison reached total error 0.058776 with off versus 0.060828 with
+scaled, and mean acceptance 62.3% versus 57.6%. Both stalled below rounding and
+left sulfur unchanged. This supports disabling a force that spends slack without
+directly targeting radial count error. The optional `scaled` mode uses coefficient
 `0.002 * current_strength / starting_strength`, affects only radial-selected
 atoms, and caps each atom's accumulated neighbor vector at half the radial
 step cap. `off` disables this contribution; `fixed` uses coefficient 0.002,
@@ -83,11 +103,21 @@ to three passes, then revert offenders with their direct neighbors. Any remainin
 conflict or center error above 1 A restores the trial. Rigid mode rejects complete
 residues. Existing edges are retained, so no trial-time component calculation is
 needed. Next-iteration and independent export validation still rebuild geometry.
-Acceptance >85% grows strength by 1.25; <50% shrinks by 0.7. Its denominator
+In acceptance strength-control mode, >85% grows strength by 1.25 and <50% shrinks
+it by 0.7. The acceptance denominator
 counts selected proposals, including feasible stationary rounded proposals,
 expanded to complete residues in rigid mode. Actual moving/retained atoms are
 reported separately. Rounded zero-move trials count toward budget/patience; rejected proposals
 also consume a push. A private snapshot provides a validation safety net.
+
+The revision-02 three-seed matrix improves total error beyond the seed spread
+and completes all 50 default pushes with 83-87% global acceptance, but its full
+scientific gate remains false. Seed 42 S has 52 crossing proposals and zero
+actual crossings, with only 33.4% sulfur acceptance and predominantly lower-bound
+rejections. A separate feasible-checkpoint probe at 0.05 A slack also leaves S
+unchanged. These traces identify locally blocked rare-element motion; they do
+not justify declaring sulfur convergence from aggregate acceptance or lowering
+the prescribed validation constraints. See `revision02` in the benchmark JSON.
 
 The optional rollback path retains a snapshot and its ranking key. More than
 0.05*N distance violations, at least 5000 components, or failure to recover

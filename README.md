@@ -238,31 +238,54 @@ validation remains independent.
 | `--refine-updates` | 50 | Maximum pushes, including attempts subsequently rolled back. |
 | `--refine-iterations` | unset | Optional cap on all iterations since first feasible geometry, including repair and rollback; off by default. |
 | `--refine-patience` | 10 | Pushes without significant improvement before stopping; 0 disables this check. |
-| `--refine-strength` | 0.005 | Starting radial-push strength; adapts during search. |
+| `--refine-strength` | 0.005 | Radial strength; fixed by default. |
+| `--refine-strength-control` | `fixed` | Keep strength fixed, follow primary profile `gain`, or restore `acceptance` feedback. Applies to per-atom acceptance. |
+| `--refine-min-step` | 0.002 A | Raise nonzero requests below this size when the desired distance is at least this large; 0 disables; must not exceed max step. |
+| `--refine-selection` | `crossing` | Reserve useful adjacent-bin crossings then drift toward edges; `mismatch` retains v0.1.5 rank matching. |
 | `--refine-max-step` | 0.05 A | Cap on the requested radial profile contribution per selected atom. |
-| `--refine-fraction` | 0.2 | Fraction per element to push, rounding up; prioritize largest radial mismatches. |
+| `--refine-fraction` | 0.2 | Per-element crossing/drift budget rounds down; mismatch rounds up. |
 | `--refine-recovery-limit` | 10 | Repair updates allowed after damage; 0 restores immediately if the next state is invalid. |
-| `--neighbor-forces` | `scaled` | Nearest-neighbor contributions: `scaled` follows push controls, `off` disables them, `fixed` uses coefficient 0.002 on all atoms. |
+| `--neighbor-forces` | `off` | Disable statistical neighbor forces; `scaled` follows push controls, `fixed` uses coefficient 0.002 on all atoms. |
 | `--refine-slack` | 0.02 A | Target distance/contact margin during consolidation and neighbor targeting; final validation limits remain unchanged. |
-| `--consolidate-iterations` | 10 | Slack-building updates before profile pushes; 0 disables; at most 3 restarts if geometry breaks. |
+| `--consolidate-iterations` | 10 | Checked slack-building updates before profile pushes; 0 disables the initial episode. |
+| `--consolidate-target` | 0.001 | Each count of pairs/edges within half the requested slack must be at most this fraction of atom count. |
+| `--reconsolidate-below` | 0.7 | Restore slack after lower acceptance; 0 disables this trigger. |
+| `--reconsolidate-every` | 10 | Restore slack after this many pushes since the last episode; 0 disables. |
+| `--reconsolidate-iterations` | 3 | Maximum checked updates per restoration episode; 0 disables restoration. |
 | `--refine-acceptance` | `per-atom` | Reject conflicting atom moves before committing; rigid mode rejects whole residues. `rollback` permits repair and snapshot recovery. |
 | `--rollback-violation-fraction` | 0.05 | Immediate rollback above this distance-violating-pair count divided by atom count; range [0, 1]. |
 | `--rollback-component-limit` | 5000 | Immediate rollback at this many components. |
 
 Before profile pushes, consolidation tries to build `--refine-slack` on both
 minimum distances and contact distances. Narrow feasible windows use one third
-of their width instead. It keeps radial clipping and centering, applies no
-profile or nearest-neighbor forces, and ends after the update allowance or once
-both weakest gaps reach half the requested slack. Broken geometry returns to
-repair; after three restarts, refinement proceeds from the next feasible state.
-Consolidation is best effort, so inspect the recorded gaps rather than assuming
-every pair gained the requested slack. The optional iteration cap includes this
-phase. A zero refinement budget stops at first feasibility before any slack update.
+of their width instead. Consolidation builds only separation/contact forces,
+caps each atom's accumulated request at half the slack, and checks a rounded
+trial through the same per-atom/residue acceptance path. It consumes iterations
+and time but no profile pushes. At least one step runs; it ends when both
+near-limit counts meet `--consolidate-target`, their combined count improves by
+less than 5% in the last step, or the episode budget ends. A safety interruption
+logs a warning and permits at most three restarts. A completed episode does not
+imply every pair gained the requested slack. A zero refinement budget stops at
+first feasibility before any slack update.
 
-All atoms of each element are radially ranked against deterministic,
-volume-aware quantiles; only the selected fraction receives radial contributions.
-The requested radial move is `clip(strength * radial_error, -max_step, max_step)`.
-With
+During refinement, low acceptance or the periodic trigger starts another checked
+episode, with at least two pushes between episodes. Disable both triggers with
+`--reconsolidate-below 0 --reconsolidate-every 0`. The patience counter advances
+only on pushes, not on consolidation updates.
+
+The default crossing selection computes current and composition-normalized target
+counts in the radial bins. For neighboring surplus/deficit bins, it reserves at
+most the floor of the available surplus and deficit, preferring atoms closest to
+the shared edge. Requested moves reach 0.002 A beyond that edge, capped at max
+step. Remaining budget drifts surplus atoms toward useful edges, using strength
+and the minimum/maximum step. Atoms rejected in the previous push are skipped.
+Crossings and drift together use at most the floor of fraction times element
+count; very small inventories may need a larger `--refine-fraction`.
+
+`--refine-selection mismatch` ranks atoms against deterministic volume-aware
+quantiles and selects the largest mismatches as in v0.1.5. Its requested move
+is strength times mismatch, raised to the minimum step where eligible, then
+capped at max step. With
 `--neighbor-forces scaled`, nearest-neighbor contributions use coefficient
 `0.002 * (current_strength / starting_strength)` and affect only atoms selected
 by the radial push. Their accumulated vector per atom is capped at half
@@ -288,8 +311,12 @@ preserves global and internal residue connectivity without recomputing component
 inside the trial check. The next normal iteration and final PDB reread still
 validate geometry independently. A center error above 1 A rejects the whole trial.
 
-Strength grows by 1.25 above 85% acceptance and shrinks by 0.7 below 50%, bounded
-above by four times its starting value. Acceptance counts selected proposals,
+Per-atom strength is fixed by default. `gain` compares the primary candidate key
+before and after each push: two consecutive non-improving pushes reduce strength
+by 0.7; a positive gain with acceptance above 85% grows it by 1.25, up to four
+times the starting value. `acceptance` restores v0.1.5 feedback, growing above
+85% and shrinking by 0.7 below 50%. Only adaptive controls can hit the starting
+strength/16 floor. Acceptance counts selected proposals,
 including feasible proposals that round to no motion; rigid mode expands them
 to complete residues. Physically moving proposals and retained moves are reported
 separately. An entirely stationary trial still consumes a push, and patience
@@ -320,6 +347,40 @@ mandatory checks. Consolidation exhausted its three restarts, so its target
 slack was only partially achieved. Sulfur error remained 0.837; total-error
 selection does not guarantee improvement for each element. These measurements
 are a reproducible benchmark, not calibrated scientific acceptance tolerances.
+
+The revision-02 A/B comparison changed only reporting and the neighbor default:
+`off` reached 0.058776 total error with 62.3% mean acceptance, versus 0.060828 and
+57.6% for `scaled`. Both left S at 0.837 and stopped below rounding resolution.
+This evidence is why statistical neighbor forces are now off by default.
+Final v0.1.6 comparisons use seeds 42, 7 and 2026. For the same-code compatibility
+case, add `--refine-selection mismatch --refine-strength-control acceptance
+--neighbor-forces scaled --reconsolidate-below 0 --reconsolidate-every 0`.
+
+The complete 1CWP runs used the same 600 s budget and 4 A unsmoothed bins:
+
+| Seed | Default total error | Compatibility total error | Default acceptance | Compatibility acceptance |
+|---|---:|---:|---:|---:|
+| 42 | 0.051604 | 0.060651 | 83.0% | 57.2% |
+| 7 | 0.053973 | 0.063915 | 84.8% | 53.2% |
+| 2026 | 0.049935 | 0.059728 | 86.8% | 54.0% |
+
+All default runs finished 50 pushes within 600 s, with no rollbacks and passing
+independent PDB validation. Their total-error spread is 0.00404; each run's
+improvement below 0.0609 exceeds that spread. **The full scientific benchmark
+gate does not pass:** seed 42 S error remains 0.837037. Its 52 crossing proposals
+produced no sulfur bin crossings; only 33.4% of S proposals were accepted, with
+minimum-distance rejections dominant. C improved for every seed, and S improved
+for seeds 7 and 2026. Global acceptance alone therefore does not establish good
+refinement for a rare element. Full per-push evidence and explicit pass/fail
+checks are in the benchmark JSON. Runs used three workers on a four-core quota
+with BLAS threads limited to one; reported search time includes that environment.
+
+A separate matched-checkpoint probe raised `--refine-slack` to 0.05 A after the
+same first-feasible seed-42 state. Its 50 pushes reached total error 0.049767,
+but S still had zero bin crossings and error 0.837037. S acceptance rose only to
+40.3%. This probe skips initial repair and is explicitly not another full CLI
+benchmark; it does not establish that a larger global slack resolves the local
+sulfur blockage. The scientific gate remains open.
 
 With `--refine-acceptance rollback`, a full coordinate snapshot is saved before
 each push, including rigid residues. Damage below the configured disaster limits
@@ -399,6 +460,9 @@ termination. Use `--progress-interval N` (positive integer) to change the cadenc
 `--quiet` suppresses stage/progress messages. Progress includes isolated atoms,
 disconnected residues and worst-element error alongside the aggregate error.
 The final selected candidate's iteration and per-element errors are also logged.
+Patience stops classify `stall_cause` from the last patience window, in order:
+`moves_below_rounding` when mean actual per-atom motion is below 0.001 A,
+`low_acceptance` below 30% mean acceptance, otherwise `converged`.
 
 Static element/radius/residue metadata is cached per inventory. Each search
 iteration computes one neighbor/overlap graph on PDB-rounded coordinates and
@@ -439,6 +503,20 @@ never coordinate snapshots or atom-index arrays.
 
 `slack_at_first_feasible` and `slack_after_consolidation` report minimum and 5th
 percentile gaps to distance/contact limits and counts within 0.005 A of them.
+They also count pairs/edges within half the requested slack. Initial
+`slack_after_consolidation` is null unless the initial episode completed;
+`slack_at_refinement_start` always describes the actual start of refinement,
+including when consolidation was abandoned. `consolidation_completed` refers to
+the initial episode. `consolidation_iterations_total` includes later restorations;
+`consolidation_history` records each episode's trigger, start/end, steps, budget,
+before/after gaps/counts and reason (`target`, `no_progress`, `iteration_limit`,
+`interrupted`, `abandoned` or `search_stopped`).
+
+Each push's `per_element` records selected/accepted/undone atoms, too-close and
+broken-contact rejections, actual bin crossings (improved/worsened/neutral L1
+count error) and `profile_error_change` (after minus before). Crossing attribution
+updates bin counts in atom-index order so multiple moves cannot all claim the
+same deficit. Masks and coordinate arrays remain private.
 `acceptance_mode`, `committed_pushes`, `mean_acceptance_fraction`,
 `recoveries_improved`, `recoveries_worse`, `repair_attempts` and `blocked_evidence`
 support the final console summary. A committed push has at least one retained
