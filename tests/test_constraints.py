@@ -1,6 +1,9 @@
 import numpy as np
-from mastercap.constraints import validate_geometry, acceptance, profile_metrics
-from mastercap.model import Atom, Structure
+import pytest
+from unittest.mock import patch
+from mastercap.constraints import (validate_geometry, acceptance, profile_metrics,
+                                   connectivity_audit, require_connectivity_audit)
+from mastercap.model import Atom, Structure, MastercapError
 
 
 def particle(x, residues):
@@ -52,3 +55,73 @@ def test_one_atom_does_not_satisfy_overlap_requirement():
     result = validate_geometry(particle([0], [0]), np.zeros(3), [0, 5], {("C", "C"): 1})
     assert result["isolated_atoms"] == 1
     assert not result["mandatory_pass"]
+
+
+@pytest.mark.parametrize("x,residues", [([-6,-4,4,6],[0,0,1,1]), ([0,2,4],[0,1,0]),
+    ([0,3.4],[0,1]), ([0,1.4],[0,0]), ([0],[0]), ([0,2],[0,1])])
+def test_independent_audit_agrees_with_geometry(x, residues):
+    s = particle(x, residues)
+    geometry = validate_geometry(s, np.zeros(3), [0, 30], {("C", "C"): 1})
+    audit = connectivity_audit(s)
+    assert audit["isolated_atoms"] == geometry["isolated_atoms"]
+    assert audit["global_components"] == geometry["global_components"]
+    assert audit["disconnected_residues"] == len(geometry["disconnected_residues"])
+
+
+def test_isolated_failure_names_the_actual_atom():
+    s = particle([0, 2, 20], [0, 0, 1])
+    s.atoms[2] = Atom("SG", "S", "CYS", 1, {"serial": 321, "chain": "A", "residue_number": "77"})
+    audit = connectivity_audit(s)
+    geometry = validate_geometry(s, np.zeros(3), [0, 30], {("C", "C"): 1})
+    with pytest.raises(MastercapError, match="serial 321 SG CYS A 77"):
+        require_connectivity_audit(audit, geometry)
+
+
+def test_audit_reports_two_clusters_and_disconnected_internal_residue():
+    s = particle([0,2,8,10], [0,1,0,2])
+    audit = connectivity_audit(s)
+    assert audit["global_components"] == 2
+    assert audit["isolated_atoms"] == 0
+    assert audit["disconnected_residues"] == 1
+    with pytest.raises(MastercapError, match="2 components"):
+        require_connectivity_audit(audit, validate_geometry(s, np.zeros(3), [0, 20], {}))
+
+
+def test_audit_does_not_reuse_search_graph_or_component_helper():
+    s = particle([0, 3.4], [0, 1])
+    with patch("mastercap.constraints.local_geometry", side_effect=AssertionError), patch("mastercap.constraints.components", side_effect=AssertionError):
+        audit = connectivity_audit(s)
+    assert audit["edge_count"] == 0
+    assert audit["global_components"] == 2
+    with pytest.raises(MastercapError, match="disagrees with validate_geometry"):
+        require_connectivity_audit(audit, {"isolated_atoms": 0, "global_components": 1, "disconnected_residues": []})
+
+
+def test_generate_records_successful_final_audit(tmp_path, small_pdb, capsys):
+    import json
+    from mastercap.cli import main
+    prefix = tmp_path/"audited"
+    assert main(["generate", "--input", str(small_pdb), "--output-prefix", str(prefix),
+                 "--seed", "42", "--allow-approximate", "--refine-updates", "0"]) == 2
+    audit = json.loads(prefix.with_suffix(".json").read_text())["connectivity_audit"]
+    assert audit["passed"] and audit["isolated_atoms"] == audit["disconnected_residues"] == 0
+    assert "Success! Final connectivity audit:" in capsys.readouterr().err
+
+
+def test_final_audit_disagreement_blocks_pdb_even_with_allow_approximate(tmp_path, small_pdb, capsys):
+    import json
+    from mastercap.cli import main
+    def wrong_audit(structure, margin):
+        result = connectivity_audit(structure, margin)
+        result.update(isolated_atoms=1, passed=False,
+                      isolated_atom_examples=result['component_representatives'][:1])
+        return result
+    prefix = tmp_path/'blocked'
+    with patch('mastercap.cli.connectivity_audit',side_effect=wrong_audit):
+        assert main(['generate','--input',str(small_pdb),'--output-prefix',str(prefix),
+                     '--seed','42','--allow-approximate','--refine-updates','0']) == 1
+    assert not prefix.with_suffix('.pdb').exists()
+    diagnostic = json.loads((tmp_path/'blocked.diagnostic.json').read_text())
+    assert diagnostic['connectivity_audit']['isolated_atoms'] == 1
+    assert 'serial 1' in diagnostic['error']
+    assert 'disagrees with validate_geometry' in capsys.readouterr().err

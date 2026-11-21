@@ -257,3 +257,46 @@ def test_acceptance_denominator_includes_selected_stationary_proposals():
     assert report["atoms_moved"] == 0
     assert report["stationary_proposals"] == 1
     assert report["acceptance_fraction"] == 0.5
+
+
+def test_too_close_rejections_identify_element_pairs_without_double_counting():
+    structure = Structure([Atom(e,e,'ALA',i) for i,e in enumerate(('O','S','C','S'))],
+                          np.array([[0.,0,0],[2.5,0,0],[8.,0,0],[10.5,0,0]]))
+    limits = {('O','S'):1.5, ('C','S'):1.5}
+    metadata = GeometryMetadata.build(structure, limits)
+    local = local_geometry(structure, limits, metadata=metadata)
+    trial = structure.xyz.copy()
+    trial[1,0], trial[3,0] = 1., 9.
+    _, record = accept_trial(structure.xyz,trial,local,metadata,structure.xyz.mean(axis=0),[0,20],
+                              selected_indices=np.array([1,3]))
+    assert record['undone_too_close_by_pair'] == {'C-S':1, 'O-S':1}
+    assert record['per_element']['S']['undone_too_close_by_pair'] == {'C-S':1, 'O-S':1}
+    assert record['per_element']['O']['undone_too_close_by_pair'] == {}
+    assert record['atoms_proposed'] == 2
+    assert record['atoms_accepted'] == 0
+    assert record['atoms_undone'] == 2
+    assert 0 <= record['acceptance_fraction'] <= 1
+    assert sum(v['accepted']+v['undone'] for v in record['per_element'].values()) == record['atoms_proposed']
+
+
+def test_noncontact_pair_builds_distance_slack_without_contact_pull():
+    structure = Structure([Atom('O','O','ALA',0),Atom('S','S','CYS',1)],
+                          np.array([[0.,0,0],[3.47,0,0]]))
+    metadata = GeometryMetadata.build(structure,{('O','S'):3.47})
+    local = local_geometry(structure,{('O','S'):3.47},metadata=metadata)
+    pairs, targets, touching, _ = consolidation_targets(local,metadata,.02)
+    assert len(pairs) == 1 and len(touching) == 0
+    assert targets[0] == pytest.approx(3.49)
+    assert len(consolidation_targets(local,metadata,.02,noncontact_slack=False)[0]) == 0
+
+
+@pytest.mark.parametrize('override_mode', ['steric','number','reference'])
+def test_statistical_neighbor_force_skips_only_actual_limit_overrides(override_mode):
+    structure = Structure([Atom('S','S','CYS',i) for i in range(2)],np.array([[0.,0,0],[2.,0,0]]))
+    analysis = SimpleNamespace(limits={('S','S'):1.5},
+        neighbor_samples={'S-S':{'percentiles':{'50':20.0}}},
+        distance_limit_overrides=[{'pair':'S-S','mode':override_mode}])
+    metadata = GeometryMetadata.build(structure,analysis.limits)
+    force = np.zeros_like(structure.xyz)
+    characteristic_forces(force,structure,analysis,metadata)
+    assert bool(force.any()) == (override_mode=='reference')

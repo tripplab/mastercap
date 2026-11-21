@@ -1,6 +1,7 @@
 """Bounded geometric search. Failure to converge is not proof of infeasibility."""
 from collections import defaultdict
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
+from collections import Counter
 import logging
 import time
 import numpy as np
@@ -100,7 +101,102 @@ def profile_quantiles(profile, edges, n):
     return (edges[bins]**3+fraction*(edges[bins+1]**3-edges[bins]**3))**(1/3)
 
 
-def initialize(structure, analysis, edges, profiles, center, rng, mode, distribution, *, groups=None):
+@dataclass
+class SulfurAnchors:
+    indices: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
+    radii: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
+    summary: dict = field(default_factory=dict)
+
+    def observations(self, xyz, center, edges):
+        if not len(self.indices):
+            return {"in_target_bin_count": 0, "in_target_bin_fraction": None,
+                    "mean_radial_error_angstrom": None, "max_radial_error_angstrom": None}
+        radius = np.linalg.norm(xyz[self.indices]-center, axis=1)
+        actual = np.clip(np.searchsorted(edges, radius, side="right")-1, 0, len(edges)-2)
+        target = np.clip(np.searchsorted(edges, self.radii, side="right")-1, 0, len(edges)-2)
+        hits = (actual == target) & (radius >= edges[0]) & (radius <= edges[-1])
+        error = np.abs(radius-self.radii)
+        return {"in_target_bin_count": int(hits.sum()), "in_target_bin_fraction": float(hits.mean()),
+                "mean_radial_error_angstrom": float(error.mean()), "max_radial_error_angstrom": float(error.max())}
+
+
+def initialize_sulfur_profile(structure, edges, profiles, center, rng, distribution, groups, anchors):
+    n = len(groups)
+    # Keep each seed's original directions and rotations. The profile mode
+    # then adds its assignment/resampling draws and translates whole residues.
+    trace = initialize(structure, None, edges, profiles, center, rng, "independent", distribution, groups=groups)
+    centroids = np.array([structure.xyz[group].mean(axis=0) for group in groups])
+    directions = centroids-center
+    directions /= np.linalg.norm(directions, axis=1)[:, None]
+    sulfur_groups, anchor_indices, multiple = [], [], 0
+    names = Counter()
+    for k, group in enumerate(groups):
+        sulfur = [int(i) for i in group if structure.atoms[i].element == "S"]
+        if sulfur:
+            sulfur_groups.append(k)
+            anchor_indices.append(sulfur[0])
+            multiple += len(sulfur) > 1
+            names[structure.atoms[group[0]].resname] += 1
+    target_radii = profile_quantiles(profiles["S"], edges, len(anchor_indices))
+    if distribution == "regular":
+        bins = np.clip(np.searchsorted(edges, target_radii, side="right")-1, 0, len(edges)-2)
+        target_radii = (edges[bins]+edges[bins+1])/2
+    target_radii = target_radii[rng.permutation(len(target_radii))]
+    anchors.indices, anchors.radii = np.asarray(anchor_indices), target_radii
+    anchors.summary.update(anchored_residue_count=len(anchor_indices), residue_names=dict(sorted(names.items())),
+                           multiple_sulfur_residues=int(multiple), target_bin_counts=np.histogram(target_radii, edges)[0].tolist())
+    if multiple:
+        logging.getLogger(__name__).warning("Sulfur profile placement: %d multi-S residues; only the first S in each residue is anchored", multiple)
+    logging.getLogger(__name__).info("Sulfur profile placement: %d anchored residues (%s)",
+                                     len(anchor_indices), ", ".join(f"{name}={count}" for name, count in sorted(names.items())))
+    placed = []
+
+    def place(k, rho):
+        group = groups[k]
+        target = center+rho*directions[k]
+        shift = target-centroids[k]
+        structure.xyz[group] += shift
+        trace[k]["translation"] = (np.asarray(trace[k]["translation"])+shift).tolist()
+
+    for k, atom_index, radius in zip(sulfur_groups, anchor_indices, target_radii):
+        group = groups[k]
+        offset = structure.xyz[atom_index]-centroids[k]
+        dot = float(directions[k]@offset)
+        discriminant = dot*dot-float(offset@offset)+radius*radius
+        if discriminant < -1e-10:
+            raise MastercapError("Sulfur target radius is too small for its rotated residue offset")
+        rho = -dot+np.sqrt(max(0, discriminant))
+        if rho < 0:
+            raise MastercapError("Sulfur target requires a negative residue-center distance")
+        place(k, rho)
+        placed.extend(groups[k])
+    remaining_groups = sorted(set(range(n))-set(sulfur_groups))
+    if remaining_groups:
+        radii = np.linalg.norm(structure.xyz[placed]-center, axis=1)
+        contribution = np.histogram(radii, edges)[0]/shell_volumes(edges)
+        remaining = np.maximum(sum(profiles.values())-contribution, 0)
+        radial = sample_radii(remaining, edges, len(remaining_groups), rng)
+        if distribution == "regular":
+            bins = np.clip(np.searchsorted(edges, radial)-1, 0, len(edges)-2)
+            radial = (edges[bins]+edges[bins+1])/2
+        for k, radius in zip(remaining_groups, radial):
+            place(k, radius)
+    return trace
+
+
+def initialize(structure, analysis, edges, profiles, center, rng, mode, distribution, *, groups=None,
+               sulfur_residue_placement="off", sulfur_anchors=None):
+    if sulfur_residue_placement not in ("off", "profile"):
+        raise MastercapError("Sulfur residue placement must be off or profile")
+    anchors = sulfur_anchors if sulfur_anchors is not None else SulfurAnchors()
+    anchors.summary = {"mode": sulfur_residue_placement, "effective_mode": "off", "anchored_residue_count": 0,
+                       "residue_names": {}, "multiple_sulfur_residues": 0, "target_bin_counts": []}
+    if sulfur_residue_placement == "profile":
+        if any(atom.element == "S" for atom in structure.atoms):
+            anchors.summary["effective_mode"] = "profile"
+            groups = residue_groups(structure) if groups is None else groups
+            return initialize_sulfur_profile(structure, edges, profiles, center, rng, distribution, groups, anchors)
+        logging.getLogger(__name__).info("Sulfur profile placement has no effect: inventory contains no S atoms; using off")
     groups = residue_groups(structure) if groups is None else groups
     n = len(groups)
     if distribution == "regular":
@@ -262,7 +358,10 @@ def characteristic_forces(force, structure, analysis, metadata, *, mode="fixed",
         return {"mode": mode, "mean_move_angstrom": 0.0, "max_move_angstrom": 0.0,
                 "active_atoms": 0, "strength": 0.0}
     neighbor = np.zeros_like(force)
+    overridden = {entry["pair"] for entry in getattr(analysis, "distance_limit_overrides", []) if entry["mode"] != "reference"}
     for (a, b), lower in analysis.limits.items():
+        if "-".join((a, b)) in overridden:
+            continue
         summary = analysis.neighbor_samples["-".join((a, b))]["percentiles"]
         if "50" not in summary:
             continue
@@ -306,7 +405,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
            rollback_violation_fraction=0.05, rollback_component_limit=5000,
            refine_strength_control="fixed", refine_min_step=0.002, consolidate_target=0.001,
            reconsolidate_below=0.7, reconsolidate_every=10, reconsolidate_iterations=3,
-           refine_selection="crossing"):
+           refine_selection="crossing", sulfur_residue_placement="off", consolidate_noncontact_slack="on"):
     preparation_started = time.monotonic()
     if (max_iterations < 0 or time_limit <= 0 or margin < 0 or progress_interval < 1
             or (refine_iterations is not None and refine_iterations < 0)
@@ -330,6 +429,10 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         raise MastercapError("Strength control must be fixed, gain or acceptance")
     if refine_selection not in ("crossing", "mismatch"):
         raise MastercapError("Refinement selection must be crossing or mismatch")
+    if sulfur_residue_placement not in ("off", "profile"):
+        raise MastercapError("Sulfur residue placement must be off or profile")
+    if consolidate_noncontact_slack not in ("on", "off"):
+        raise MastercapError("Noncontact consolidation slack must be on or off")
     if stage_progress:
         stage_progress("Building inventory metadata and initializing particle coordinates")
     metadata = GeometryMetadata.build(structure, analysis.limits)
@@ -337,7 +440,13 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         return slack_summary(local, metadata, margin, mode, slack=refine_slack)
 
     groups = list(metadata.groups.values())
-    rotations = initialize(structure, analysis, edges, profiles, center, rng, mode, distribution, groups=groups)
+    anchors = SulfurAnchors()
+    rotations = initialize(structure, analysis, edges, profiles, center, rng, mode, distribution, groups=groups,
+                           sulfur_residue_placement=sulfur_residue_placement, sulfur_anchors=anchors)
+    sulfur_initial_error = sulfur_first_error = None
+    sulfur_first_observations = None
+    anchor_updates = 0
+    anchor_force_sum = anchor_force_max = 0.0
     if mode == "residue":
         check = local_geometry(structure, analysis.limits, margin, mode, metadata=metadata)
         if check["disconnected_residues"]:
@@ -396,6 +505,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         metrics = profile_metrics(candidate, center, edges, profiles, analysis.original, metadata=metadata)
         if initial_metrics is None:
             initial_metrics = {"total_profile_error": metrics["total_profile_error"], "elements": metrics["elements"]}
+            sulfur_initial_error = metrics["elements"].get("S", {}).get("profile_error")
         summary = error_summary(metrics)
         rolled_back = controller.observe(iteration, geometry, structure.xyz,
                                          candidate_key(metrics, selection_objective), summary)
@@ -412,6 +522,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             feasible_iterations.append(iteration)
             if first_feasible is None:
                 first_feasible = iteration
+                sulfur_first_error = metrics["elements"].get("S", {}).get("profile_error")
+                sulfur_first_observations = anchors.observations(candidate.xyz, center, edges)
                 slack_first = measure_slack(local)
                 if stage_progress and refine_updates and refine_iterations != 0 and status != "valid":
                     stage_progress(f"Geometry feasible at iteration {iteration}; refining per-element profiles "
@@ -526,7 +638,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             continue
         restored_snapshot = False
         if phase == "consolidate" and geometry["mandatory_pass"]:
-            near, desired, touching, contact = consolidation_targets(local, metadata, refine_slack, margin, mode)
+            near, desired, touching, contact = consolidation_targets(local, metadata, refine_slack, margin, mode,
+                                                                    consolidate_noncontact_slack == "on")
             consolidation_force = np.zeros_like(structure.xyz)
             pair_forces(consolidation_force, candidate.xyz, near, desired, strength=0.3)
             pair_forces(consolidation_force, candidate.xyz, touching, contact, strength=0.15)
@@ -545,6 +658,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             continue
         pieces = {name: np.zeros_like(structure.xyz) for name in
                   ("repair", "bridges", "radial_clip", "centering", "radial_push", "nearest_neighbor")}
+        if len(anchors.indices):
+            pieces["sulfur_anchor"] = np.zeros_like(structure.xyz)
         force = pieces["repair"]
         repair = local["distances"] < local["lower"]+0.003
         if mode == "residue":
@@ -569,6 +684,12 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         radial = np.linalg.norm(offset, axis=1)
         direction = offset/np.maximum(radial, 1e-12)[:, None]
         direction[radial < 1e-12] = [1, 0, 0]
+        if first_feasible is None and len(anchors.indices):
+            wanted = 0.05*(anchors.radii-radial[anchors.indices])
+            pieces["sulfur_anchor"][anchors.indices] = wanted[:, None]*direction[anchors.indices]
+            anchor_updates += 1
+            anchor_force_sum += float(np.abs(wanted).mean())
+            anchor_force_max = max(anchor_force_max, float(np.abs(wanted).max()))
         clipped = np.clip(radial, edges[0]+0.002, edges[-1]-0.002)
         pieces["radial_clip"][:] = (clipped-radial)[:, None]*direction*0.8
         pieces["centering"][:] = (center-structure.xyz.mean(axis=0))*0.1
@@ -684,12 +805,28 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                        "acceptance": refine_acceptance,
                        "strength_control": refine_strength_control, "min_step_angstrom": refine_min_step,
                        "selection": refine_selection,
+                       "consolidate_noncontact_slack": consolidate_noncontact_slack,
                        "consolidate_target": consolidate_target,
                        "reconsolidate_below": reconsolidate_below, "reconsolidate_every": reconsolidate_every,
                        "reconsolidate_iterations": reconsolidate_iterations,
                        "big_damage_distance_fraction": rollback_violation_fraction,
                        "big_damage_component_limit": rollback_component_limit}})
     report["initial_transforms"] = rotations
+    pair_totals, sulfur_pairs = Counter(), Counter()
+    for push in push_history:
+        pair_totals.update(push.get("undone_too_close_by_pair", {}))
+        sulfur_pairs.update(push.get("per_element", {}).get("S", {}).get("undone_too_close_by_pair", {}))
+    report["undone_too_close_by_pair"] = dict(sorted(pair_totals.items()))
+    report["sulfur_top_rejection_pairs"] = [{"pair": pair, "count": int(count)}
+                                           for pair, count in sorted(sulfur_pairs.items(), key=lambda item: (-item[1], item[0]))[:3]]
+    report["sulfur_placement"] = {**anchors.summary, "profile_error_initial": sulfur_initial_error,
+        "profile_error_first_feasible": sulfur_first_error,
+        "profile_error_final": report["metrics"]["elements"].get("S", {}).get("profile_error"),
+        "first_feasible": sulfur_first_observations,
+        "final": anchors.observations(output.xyz if output is not None else candidate.xyz, center, edges),
+        "repair_anchor_updates": anchor_updates, "spring_updates_after_first_feasible": 0,
+        "repair_anchor_mean_requested_move_angstrom": anchor_force_sum/anchor_updates if anchor_updates else 0.0,
+        "repair_anchor_max_requested_move_angstrom": anchor_force_max}
     return output, report
 
 

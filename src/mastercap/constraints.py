@@ -5,6 +5,7 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 from .analysis import histogram, shell_volumes
+from .model import MastercapError
 
 
 @dataclass
@@ -45,6 +46,79 @@ def components(n, edges):
         return n, np.arange(n)
     graph = coo_matrix((np.ones(len(edges)), (edges[:, 0], edges[:, 1])), shape=(n, n)).tocsr()
     return connected_components(graph, directed=False)
+
+
+def connectivity_audit(structure, margin=0.0, metadata=None):
+    """Fresh final graph, independent of local_geometry and its graph helper.
+
+    Atom examples use zero-based file-order indices and actual PDB identifiers;
+    repeated serials are disambiguated by segment/residue identity.
+    """
+    xyz, radii, residues = structure.xyz, structure.radii, structure.residues
+    n = len(xyz)
+    pairs = cKDTree(xyz).query_pairs(2*radii.max(), output_type="ndarray") if n else np.empty((0, 2), int)
+    lengths = np.linalg.norm(xyz[pairs[:, 0]]-xyz[pairs[:, 1]], axis=1)
+    edges = pairs[lengths < radii[pairs].sum(axis=1)-margin]
+    graph = coo_matrix((np.ones(len(edges), dtype=bool), (edges[:, 0], edges[:, 1])), shape=(n, n)).tocsr()
+    count, labels = connected_components(graph, directed=False)
+    sizes = np.bincount(labels, minlength=count)
+    degree = np.bincount(edges.ravel(), minlength=n)
+
+    def identity(i):
+        atom = structure.atoms[int(i)]
+        return {"index": int(i), "serial": atom.origin.get("serial"), "atom_name": atom.name,
+                "residue_name": atom.resname, "residue_number": atom.origin.get("residue_number", atom.residue+1),
+                "residue_index": atom.residue, "chain": atom.origin.get("chain", ""),
+                "segment": atom.origin.get("segment", 0), "element": atom.element}
+
+    internal = edges[residues[edges[:, 0]] == residues[edges[:, 1]]]
+    by_residue = {}
+    if len(internal):
+        order = np.argsort(residues[internal[:, 0]], kind="stable")
+        ordered = internal[order]
+        for block in np.split(ordered, np.flatnonzero(np.diff(residues[ordered[:, 0]]))+1):
+            by_residue[int(residues[block[0, 0]])] = block
+    order = np.argsort(residues, kind="stable")
+    groups = np.split(order, np.flatnonzero(np.diff(residues[order]))+1) if n else []
+    local_index = np.empty(n, dtype=int)
+    disconnected = []
+    for group in groups:
+        if len(group) <= 1:
+            continue
+        local_index[group] = np.arange(len(group))
+        intra = by_residue.get(int(residues[group[0]]), np.empty((0, 2), int))
+        rows = local_index[intra]
+        subgraph = coo_matrix((np.ones(len(rows), dtype=bool), (rows[:, 0], rows[:, 1])),
+                             shape=(len(group), len(group))).tocsr()
+        subcount, _ = connected_components(subgraph, directed=False)
+        if subcount > 1:
+            disconnected.append(identity(group[0]))
+    representatives = np.unique(labels, return_index=True)[1][:20]
+    isolated = np.flatnonzero(degree == 0)
+    small = np.flatnonzero(sizes[labels] < 10)[:20]
+    return {"atom_count": n, "edge_count": len(edges), "isolated_atoms": len(isolated),
+            "isolated_atom_examples": [identity(i) for i in isolated[:20]], "global_components": int(count),
+            "largest_component_sizes": sorted(sizes.astype(int).tolist(), reverse=True)[:10],
+            "small_component_atoms": [{**identity(i), "component": int(labels[i])} for i in small],
+            "component_representatives": [identity(i) for i in representatives],
+            "disconnected_residues": len(disconnected), "disconnected_residue_examples": disconnected[:20],
+            "passed": bool(not len(isolated) and count == 1 and not disconnected)}
+
+
+def require_connectivity_audit(audit, geometry):
+    disagreement = (audit["isolated_atoms"] != geometry["isolated_atoms"]
+                    or audit["global_components"] != geometry["global_components"]
+                    or audit["disconnected_residues"] != len(geometry["disconnected_residues"]))
+    if audit["passed"] and not disagreement:
+        return
+    examples = (audit["isolated_atom_examples"] or audit["disconnected_residue_examples"]
+                or audit["component_representatives"])
+    names = "; ".join(f"index {a['index']} serial {a['serial']} {a['atom_name']} {a['residue_name']} "
+                      f"{a['chain']} {a['residue_number']}" for a in examples[:5])
+    raise MastercapError(f"Final connectivity audit failed: {audit['isolated_atoms']} isolated atoms, "
+                        f"{audit['global_components']} components, {audit['disconnected_residues']} disconnected residues; "
+                        f"atoms: {names or 'empty structure'}"
+                        +("; disagrees with validate_geometry" if disagreement else ""))
 
 
 def local_geometry(structure, limits, margin=0.0, mode="independent", *, metadata=None):
