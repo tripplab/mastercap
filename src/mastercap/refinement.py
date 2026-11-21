@@ -27,7 +27,7 @@ def candidate_key(metrics, objective="total"):
 
 
 def apply_radial_push(force, radial, direction, element_indices, targets,
-                      strength, max_step, fraction):
+                      strength, max_step, fraction, min_step=0.0):
     """Select the largest radial mismatches per element; cap requested moves.
 
     These are radial contributions BEFORE rigid projection, other forces, and
@@ -44,7 +44,7 @@ def apply_radial_push(force, radial, direction, element_indices, targets,
         delta = target-radial[order]
         count = min(len(order), max(1, int(np.ceil(fraction*len(order)))))
         chosen = np.argsort(-np.abs(delta), kind="stable")[:count]
-        requested = np.clip(strength*delta[chosen], -max_step, max_step)
+        requested = minimum_moves(delta[chosen], strength, min_step, max_step)
         force[order[chosen]] += requested[:, None]*direction[order[chosen]]
         selected.append(order[chosen])
         sizes.append(count)
@@ -59,6 +59,98 @@ def apply_radial_push(force, radial, direction, element_indices, targets,
     return details, np.concatenate(selected) if selected else np.array([], dtype=int)
 
 
+def minimum_moves(delta, strength, min_step, max_step):
+    requested = strength*delta
+    small = (np.abs(delta) >= min_step) & (np.abs(requested) > 0) & (np.abs(requested) < min_step)
+    requested[small] = np.sign(requested[small])*min_step
+    return np.clip(requested, -max_step, max_step)
+
+
+def bin_inventory(radial, element_indices, edges, profiles):
+    """Integer observations and composition-normalized target counts per bin."""
+    from .analysis import shell_volumes
+    bins, volume = radial_bins(radial, edges), shell_volumes(edges)
+    result = {}
+    for e, indices in element_indices.items():
+        valid = bins[indices]
+        valid = valid[(valid >= 0) & (valid < len(volume))]
+        counts = np.bincount(valid, minlength=len(volume)).astype(float)
+        target = np.asarray(profiles[e])*volume
+        if target.sum():
+            target = target*(len(indices)/target.sum())
+        result[e] = (counts, target, counts-target)
+    return bins, result
+
+
+def apply_crossing_push(force, radial, direction, element_indices, profiles, edges,
+                        strength, max_step, fraction, min_step=0.002, blocked=None):
+    """Reserve adjacent-bin quotas, then drift remaining atoms toward useful edges."""
+    bins, inventory = bin_inventory(radial, element_indices, edges, profiles)
+    blocked = np.zeros(len(radial), dtype=bool) if blocked is None else blocked
+    used = np.zeros(len(radial), dtype=bool)
+    selected, absolute, per_element = [], [], {}
+    for e, indices in element_indices.items():
+        _, _, balance = inventory[e]
+        capacity = int(np.floor(fraction*len(indices)))
+        chosen, requested = [], []
+        crossing_count = 0
+        for edge in range(1, len(edges)-1):
+            for source, destination, sign in ((edge-1, edge, 1), (edge, edge-1, -1)):
+                if balance[source] <= 0 or balance[destination] >= 0:
+                    continue
+                quota = int(np.floor(min(balance[source], -balance[destination])+1e-8))
+                count = min(quota, capacity-len(chosen))
+                if count <= 0:
+                    continue
+                candidates = indices[(bins[indices] == source) & ~blocked[indices] & ~used[indices]]
+                distance = np.abs(radial[candidates]-edges[edge])
+                order = np.argsort(distance, kind="stable")
+                order = order[distance[order] <= max_step][:count]
+                take = candidates[order]
+                move = sign*np.minimum(distance[order]+0.002, max_step)
+                chosen.extend(take.tolist())
+                requested.extend(move.tolist())
+                used[take] = True
+                balance[source] -= len(take)
+                balance[destination] += len(take)
+                crossing_count += len(take)
+        # Prefer the nearest useful edge, deduplicating atoms with two choices.
+        drift_indices, drift_distance, drift_sign = [], [], []
+        for edge in range(1, len(edges)-1):
+            for source, destination, sign in ((edge-1, edge, 1), (edge, edge-1, -1)):
+                if balance[source] <= 0 or balance[destination] >= 0:
+                    continue
+                candidates = indices[(bins[indices] == source) & ~blocked[indices] & ~used[indices]]
+                distance = np.abs(radial[candidates]-edges[edge])
+                eligible = distance > max_step
+                drift_indices.append(candidates[eligible])
+                drift_distance.append(distance[eligible])
+                drift_sign.append(np.full(int(eligible.sum()), sign))
+        if drift_indices and len(chosen) < capacity:
+            ix, distance, sign = map(np.concatenate, (drift_indices, drift_distance, drift_sign))
+            order = np.argsort(distance, kind="stable")
+            _, first = np.unique(ix[order], return_index=True)
+            order = order[np.sort(first)][:capacity-len(chosen)]
+            take = ix[order]
+            move = minimum_moves(sign[order]*distance[order], strength, min_step, max_step)
+            chosen.extend(take.tolist())
+            requested.extend(move.tolist())
+            used[take] = True
+        chosen, requested = np.asarray(chosen, dtype=int), np.asarray(requested, dtype=float)
+        force[chosen] += requested[:, None]*direction[chosen]
+        selected.append(chosen)
+        absolute.append(np.abs(requested))
+        per_element[e] = {"selected": len(chosen), "crossing_proposals": crossing_count,
+                          "drift_proposals": len(chosen)-crossing_count}
+    moves = np.concatenate(absolute) if absolute else np.array([])
+    chosen = np.concatenate(selected) if selected else np.array([], dtype=int)
+    return {"strength": float(strength), "selected_atoms": len(chosen),
+            "atoms_pushed": int(np.count_nonzero(moves)),
+            "mean_requested_radial_move_angstrom": float(moves.mean()) if len(moves) else 0.0,
+            "max_requested_radial_move_angstrom": float(moves.max()) if len(moves) else 0.0,
+            "fraction": float(fraction), "max_step_angstrom": float(max_step), "per_element": per_element}, chosen
+
+
 def damage_summary(iteration, geometry):
     return {"iteration": iteration, "distance_violations": geometry["distance_violations"],
             "global_components": geometry["global_components"],
@@ -69,7 +161,7 @@ def damage_summary(iteration, geometry):
             "mandatory_pass": geometry["mandatory_pass"]}
 
 
-def slack_summary(local, metadata, margin=0.0, mode="independent"):
+def slack_summary(local, metadata, margin=0.0, mode="independent", slack=0.02):
     """Measure margins on the already computed rounded-coordinate graph."""
     pairs = local["pairs"]
     gaps = local["distances"]-local["lower"]
@@ -82,7 +174,8 @@ def slack_summary(local, metadata, margin=0.0, mode="independent"):
     for name, values in (("distance", gaps), ("contact", contact)):
         result.update({f"{name}_gap_min_angstrom": float(values.min()) if len(values) else None,
                        f"{name}_gap_p05_angstrom": float(np.percentile(values, 5)) if len(values) else None,
-                       f"{name}_within_0_005_angstrom": int(np.count_nonzero(values < 0.005))})
+                       f"{name}_within_0_005_angstrom": int(np.count_nonzero(values < 0.005)),
+                       f"{name}_within_half_slack": int(np.count_nonzero(values < slack/2))})
     return result
 
 
@@ -274,40 +367,54 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
 class AcceptanceController:
     """Adapt to accepted moves; retain a snapshot only as a validation safety net."""
 
-    def __init__(self, strength, history):
+    def __init__(self, strength, history, control="fixed"):
+        if control not in ("fixed", "gain", "acceptance"):
+            raise MastercapError("Strength control must be fixed, gain or acceptance")
         self.strength, self.minimum, self.maximum = strength, strength/16, 4*strength
         self.history, self.pending, self.rollbacks = history, None, 0
         self.blocked = False
+        self.control, self.no_gain = control, 0
 
     @property
     def stalled(self):
-        return self.strength < self.minimum
+        return self.control != "fixed" and self.strength < self.minimum
 
     def start(self, iteration, xyz, details, key=None):
         record = {"iteration": iteration, **details, "rollback": False,
                   "recovery_iterations": None, "outcome": "pending"}
         self.history.append(record)
-        self.pending = record, xyz.copy()
+        self.pending = record, xyz.copy(), key
         fraction = details["acceptance_fraction"]
-        if fraction > 0.85:
+        if self.control == "acceptance" and fraction > 0.85:
             self.strength = min(self.maximum, self.strength*1.25)
-        elif fraction < 0.5:
+        elif self.control == "acceptance" and fraction < 0.5:
             self.strength *= 0.7
         record["strength_after"] = self.strength
 
     def observe(self, iteration, geometry, xyz, key=None, summary=None):
         if self.pending is None:
             return False
-        record, snapshot = self.pending
+        record, snapshot, before_key = self.pending
         record.update({"damage": damage_summary(iteration, geometry), "profile_after": summary})
         finish_push_metrics(record, summary)
         self.pending = None
         if geometry["mandatory_pass"]:
+            if self.control == "gain" and before_key is not None and key is not None:
+                gain = before_key[0]-key[0]
+                record["primary_profile_gain"] = float(gain)
+                self.no_gain = self.no_gain+1 if gain <= 0 else 0
+                if self.no_gain >= 2:
+                    self.strength *= 0.7
+                    self.no_gain = 0
+                elif gain > 0 and record["acceptance_fraction"] > 0.85:
+                    self.strength = min(self.maximum, self.strength*1.25)
+                record["strength_after"] = self.strength
             record.update({"outcome": "accepted", "recovery_iterations": 0})
             return False
         xyz[:] = snapshot
         self.rollbacks += 1
-        self.strength *= 0.5
+        if self.control != "fixed":
+            self.strength *= 0.5
         record.update({"rollback": True, "rollback_reason": "validation_safety_net",
                        "outcome": "rolled_back", "strength_after": self.strength})
         return True

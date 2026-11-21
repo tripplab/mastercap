@@ -94,13 +94,21 @@ Workflow and defaults:
   Either budget set to 0 restores first-feasible stopping. Time/max-iteration
   limits still apply. --selection-objective total ranks atom-weighted error
   first; worst-element restores the previous worst-element-first ranking.
-  Pushes target the largest radial mismatches in a fraction of each element
-  (default 0.2), use starting strength 0.005, and cap requested radial moves
-  at 0.05 A. First build 0.02 A distance/contact slack for up to 10 consolidation
-  updates (0 disables); final validation limits remain unchanged.
+  --refine-selection crossing (default) targets surplus-to-deficit adjacent-bin
+  crossings, then drifts atoms toward useful edges. mismatch keeps rank matching.
+  At most 0.2 of each element is selected per crossing/drift push (round down).
+  Radial strength is fixed at 0.005 by default; --refine-strength-control gain
+  follows primary profile gain, and acceptance restores the earlier feedback.
+  --refine-min-step 0.002 A avoids sub-rounding requests; the max is 0.05 A.
+  Checked consolidation builds 0.02 A slack for up to 10 updates. It stops when
+  near-limit counts are <=0.001 times atom count, progress is <5%, or budget ends.
+  Restore slack below 70% acceptance or every 10 pushes, for up to 3 checked
+  updates, with at least 2 pushes between episodes. Final limits are unchanged.
   --refine-acceptance per-atom (default) checks a rounded trial and undoes only
   conflicting moves, or whole residues in rigid mode, preserving every old
-  contact. Strength grows above 85% acceptance and shrinks below 50%.
+  contact. Only acceptance strength control grows above 85% acceptance and shrinks
+  below 50%; gain control shrinks after 2 non-improving pushes and grows on gain
+  with >85% acceptance. Fixed control cannot hit a strength floor.
   rollback permits repairs, retaining recovered geometry only if its ranking
   improves; disaster defaults are a violating-pair count above 0.05 times the
   atom count, or 5000 components.
@@ -265,13 +273,20 @@ def parser():
             command.add_argument("--selection-objective", choices=("total", "worst-element"), default="total", help="Ranks feasible candidates: total = atom-weighted total profile error (default); worst-element = minimize the worst per-element error first (previous behaviour)")
             command.add_argument("--refine-updates", type=nonnegative_integer, default=50, help="Profile-push budget, counting rolled-back pushes too; 0 stops at first feasible geometry")
             command.add_argument("--refine-patience", type=nonnegative_integer, default=10, help="Stop after this many pushes without a significant relative improvement in the primary selection error (0.1 percent); 0 disables patience stopping")
-            command.add_argument("--refine-strength", type=finite_positive, default=0.005, help="Starting radial-push strength; follows acceptance fraction or rollback feedback, capped at 4x; stalls below 1/16 of this value")
+            command.add_argument("--refine-strength", type=finite_positive, default=0.005, help="Radial strength, fixed by default; gain/acceptance controls adapt up to 4x and stall below 1/16; rollback retains damage feedback")
+            command.add_argument("--refine-strength-control", choices=("fixed", "gain", "acceptance"), default="fixed", help="Per-atom strength: fixed keeps the starting value; gain follows primary profile improvement; acceptance restores the previous acceptance feedback. Rollback mode retains damage feedback")
+            command.add_argument("--refine-min-step", type=finite_nonnegative, default=0.002, help="Minimum nonzero requested radial move in A when the target mismatch is at least this large; must not exceed --refine-max-step; 0 disables")
+            command.add_argument("--refine-selection", choices=("crossing", "mismatch"), default="crossing", help="Crossing targets useful adjacent-bin crossings, then drifts surplus atoms toward edges; skips previous rejected atoms. Mismatch keeps v0.1.5 rank-matched selection")
             command.add_argument("--refine-max-step", type=finite_positive, default=0.05, help="Maximum absolute requested radial profile move per selected atom in A; excludes other forces and rigid projection")
-            command.add_argument("--refine-fraction", type=positive_fraction, default=0.2, help="Fraction of atoms per element selected per push; prioritize largest radial mismatches, round count up; must be in (0, 1]")
+            command.add_argument("--refine-fraction", type=positive_fraction, default=0.2, help="Crossing/drift atom budget per element, rounding down; mismatch rounds up and prefers largest radial mismatches; must be in (0, 1]")
             command.add_argument("--refine-recovery-limit", type=nonnegative_integer, default=10, help="Maximum repair updates after a damaging push before restoring its snapshot; 0 permits no repair updates")
             command.add_argument("--neighbor-forces", choices=("scaled", "off", "fixed"), default="off", help="Refinement nearest-neighbor forces: off disables them (default); scaled follows radial strength, selection and a half-step per-atom cap; fixed keeps unscaled 0.002/all-atom behavior. Targets are guarded in both active modes")
             command.add_argument("--refine-slack", type=finite_nonnegative, default=0.02, help="Target distance/contact slack in A during consolidation and neighbor targeting; final validation limits are unchanged")
-            command.add_argument("--consolidate-iterations", type=nonnegative_integer, default=10, help="Consolidation updates before refinement; 0 disables; at most 3 restarts after broken geometry")
+            command.add_argument("--consolidate-iterations", type=nonnegative_integer, default=10, help="Maximum checked consolidation updates before refinement; 0 disables initial consolidation; restarts only as a safety net")
+            command.add_argument("--consolidate-target", type=unit_fraction, default=0.001, help="Stop checked consolidation when each near-limit pair/edge count is at most this fraction of atom count, or improvement falls below 5 percent; at least one update")
+            command.add_argument("--reconsolidate-below", type=unit_fraction, default=0.7, help="Restore slack after a push with lower acceptance than this fraction; 0 disables; at least 2 pushes between episodes")
+            command.add_argument("--reconsolidate-every", type=nonnegative_integer, default=10, help="Restore slack after this many pushes since the last episode; 0 disables periodic restoration")
+            command.add_argument("--reconsolidate-iterations", type=nonnegative_integer, default=3, help="Maximum checked updates per slack-restoration episode; these consume time/iterations but not pushes; 0 disables episodes")
             command.add_argument("--refine-acceptance", choices=("per-atom", "rollback"), default="per-atom", help="Per-atom rejects conflicting trial moves before commit (whole residues in rigid mode); rollback permits repair and snapshot recovery")
             command.add_argument("--rollback-violation-fraction", type=unit_fraction, default=0.05, help="Immediate rollback disaster threshold as a fraction of atom count, in [0, 1]; smaller damage is allowed to repair")
             command.add_argument("--rollback-component-limit", type=positive_integer, default=5000, help="Immediate rollback when component count reaches this threshold")
@@ -349,17 +364,23 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
         args.seed = secrets.randbits(63)
     if (args.seed < 0 or args.max_iterations < 0 or (args.refine_iterations is not None and args.refine_iterations < 0)
             or args.refine_updates < 0 or args.refine_patience < 0 or args.refine_recovery_limit < 0
-            or args.consolidate_iterations < 0 or args.rollback_component_limit < 1):
+            or args.consolidate_iterations < 0 or args.rollback_component_limit < 1
+            or args.reconsolidate_every < 0 or args.reconsolidate_iterations < 0):
         raise MastercapError("Seed, iteration/update/patience/recovery limits must be nonnegative")
-    if (not np.isfinite([args.refine_strength, args.refine_max_step, args.refine_fraction, args.refine_slack, args.rollback_violation_fraction]).all()
+    if (not np.isfinite([args.refine_strength, args.refine_max_step, args.refine_fraction, args.refine_slack, args.rollback_violation_fraction, args.refine_min_step, args.consolidate_target, args.reconsolidate_below]).all()
             or args.refine_strength <= 0 or args.refine_strength > np.finfo(float).max/4
             or args.refine_max_step <= 0 or not 0 < args.refine_fraction <= 1 or args.refine_slack < 0
-            or not 0 <= args.rollback_violation_fraction <= 1):
+            or not 0 <= args.rollback_violation_fraction <= 1 or not 0 <= args.refine_min_step <= args.refine_max_step
+            or not 0 <= args.consolidate_target <= 1 or not 0 <= args.reconsolidate_below <= 1):
         raise MastercapError("Refinement strength/max step must be finite and positive; fraction must be in (0, 1]")
     if args.neighbor_forces not in ("scaled", "off", "fixed"):
         raise MastercapError("Neighbor forces must be scaled, off or fixed")
     if args.refine_acceptance not in ("per-atom", "rollback"):
         raise MastercapError("Refinement acceptance must be per-atom or rollback")
+    if args.refine_strength_control not in ("fixed", "gain", "acceptance"):
+        raise MastercapError("Strength control must be fixed, gain or acceptance")
+    if args.refine_selection not in ("crossing", "mismatch"):
+        raise MastercapError("Refinement selection must be crossing or mismatch")
     rng = np.random.default_rng(args.seed)
     edges, profiles = target_profiles(analysis, args.inner_radius, args.outer_radius)
     center = analysis.center if args.center == "reference" else np.zeros(3)
@@ -412,6 +433,13 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                                          refine_acceptance=args.refine_acceptance,
                                          rollback_violation_fraction=args.rollback_violation_fraction,
                                          rollback_component_limit=args.rollback_component_limit,
+                                         refine_strength_control=args.refine_strength_control,
+                                         refine_min_step=args.refine_min_step,
+                                         refine_selection=args.refine_selection,
+                                         consolidate_target=args.consolidate_target,
+                                         reconsolidate_below=args.reconsolidate_below,
+                                         reconsolidate_every=args.reconsolidate_every,
+                                         reconsolidate_iterations=args.reconsolidate_iterations,
                                          stage_progress=LOG.info)
             except MastercapError:
                 # Search raises only for invalid settings/templates during prep.

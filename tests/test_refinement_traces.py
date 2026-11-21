@@ -18,7 +18,8 @@ def trace_case(**options):
     analysis = SimpleNamespace(limits={(a, b): 0.1 for a, b in (("C", "C"), ("C", "N"), ("N", "N"))},
                                original=profiles)
     settings = dict(neighbor_forces="off", consolidate_iterations=0, refine_strength=1e-10,
-                    refine_updates=3, refine_patience=0, time_limit=30)
+                    refine_updates=3, refine_patience=0, time_limit=30, refine_min_step=0,
+                    refine_selection="mismatch")
     settings.update(options)
     with patch("mastercap.generate.initialize", return_value=[]):
         return search(structure, analysis, edges, profiles, np.zeros(3), np.random.default_rng(42), **settings)
@@ -48,10 +49,10 @@ def test_no_bin_crossing_when_moves_do_not_reach_an_edge():
 
 
 def test_incomplete_consolidation_has_no_completed_slack_measurement():
-    _, report = trace_case(consolidate_iterations=10, refine_slack=2, max_iterations=1)
+    _, report = trace_case(consolidate_iterations=10, refine_slack=2, max_iterations=0)
     assert report["consolidation_completed"] is False
     assert report["slack_after_consolidation"] is None
-    assert report["consolidation_iterations_total"] == 1
+    assert report["consolidation_iterations_total"] == 0
     assert report["consolidation_history"][0]["reason"] == "search_stopped"
 
 

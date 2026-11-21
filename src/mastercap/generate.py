@@ -13,7 +13,7 @@ from .analysis import shell_volumes
 from .constraints import GeometryMetadata, local_geometry, validate_geometry, profile_metrics, acceptance
 from .refinement import (PushController, apply_radial_push, candidate_key, error_summary,
                          slack_summary, consolidation_targets, AcceptanceController,
-                         accept_trial, force_summary, crossing_metrics, classify_stall)
+                         accept_trial, force_summary, crossing_metrics, classify_stall, apply_crossing_push)
 
 
 def residue_groups(structure):
@@ -303,17 +303,22 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
            refine_strength=0.005, refine_max_step=0.05, refine_fraction=0.2,
            refine_recovery_limit=10, neighbor_forces="off", refine_slack=0.02,
            consolidate_iterations=10, refine_acceptance="per-atom",
-           rollback_violation_fraction=0.05, rollback_component_limit=5000):
+           rollback_violation_fraction=0.05, rollback_component_limit=5000,
+           refine_strength_control="fixed", refine_min_step=0.002, consolidate_target=0.001,
+           reconsolidate_below=0.7, reconsolidate_every=10, reconsolidate_iterations=3,
+           refine_selection="crossing"):
     preparation_started = time.monotonic()
     if (max_iterations < 0 or time_limit <= 0 or margin < 0 or progress_interval < 1
             or (refine_iterations is not None and refine_iterations < 0)
             or refine_updates < 0 or refine_patience < 0 or refine_recovery_limit < 0
-            or consolidate_iterations < 0 or rollback_component_limit < 1):
+            or consolidate_iterations < 0 or rollback_component_limit < 1
+            or reconsolidate_every < 0 or reconsolidate_iterations < 0):
         raise MastercapError("Iteration/update/patience/recovery limits and margin must be nonnegative; time/progress interval positive")
-    if (not np.isfinite([refine_strength, refine_max_step, refine_fraction, refine_slack, rollback_violation_fraction]).all()
+    if (not np.isfinite([refine_strength, refine_max_step, refine_fraction, refine_slack, rollback_violation_fraction, refine_min_step, consolidate_target, reconsolidate_below]).all()
             or refine_strength <= 0 or refine_strength > np.finfo(float).max/4
             or refine_max_step <= 0 or not 0 < refine_fraction <= 1 or refine_slack < 0
-            or not 0 <= rollback_violation_fraction <= 1):
+            or not 0 <= rollback_violation_fraction <= 1 or not 0 <= refine_min_step <= refine_max_step
+            or not 0 <= consolidate_target <= 1 or not 0 <= reconsolidate_below <= 1):
         raise MastercapError("Refinement strength/max step must be finite and positive; fraction must be in (0, 1]")
     if selection_objective not in ("total", "worst-element"):
         raise MastercapError("Selection objective must be total or worst-element")
@@ -321,9 +326,16 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         raise MastercapError("Neighbor forces must be scaled, off or fixed")
     if refine_acceptance not in ("per-atom", "rollback"):
         raise MastercapError("Refinement acceptance must be per-atom or rollback")
+    if refine_strength_control not in ("fixed", "gain", "acceptance"):
+        raise MastercapError("Strength control must be fixed, gain or acceptance")
+    if refine_selection not in ("crossing", "mismatch"):
+        raise MastercapError("Refinement selection must be crossing or mismatch")
     if stage_progress:
         stage_progress("Building inventory metadata and initializing particle coordinates")
     metadata = GeometryMetadata.build(structure, analysis.limits)
+    def measure_slack(local):
+        return slack_summary(local, metadata, margin, mode, slack=refine_slack)
+
     groups = list(metadata.groups.values())
     rotations = initialize(structure, analysis, edges, profiles, center, rng, mode, distribution, groups=groups)
     if mode == "residue":
@@ -343,12 +355,15 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     consolidation_history, consolidation_episode = [], None
     consolidation_completed = False
     consolidation_iterations_total = 0
+    consolidation_previous_count = None
+    last_consolidation_update = 0
     profile_updates = 0
+    previous_undone = np.zeros(len(structure.atoms), dtype=bool)
     feasible_iterations, push_history, best_history = [], [], []
     restored_iterations = []
     restored_snapshot = False
     initial_metrics = None
-    controller = (AcceptanceController(refine_strength, push_history) if refine_acceptance == "per-atom"
+    controller = (AcceptanceController(refine_strength, push_history, refine_strength_control) if refine_acceptance == "per-atom"
                   else PushController(refine_strength, refine_recovery_limit, len(structure.atoms), push_history,
                                       rollback_violation_fraction, rollback_component_limit))
     last_significant_key = None
@@ -362,6 +377,15 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     termination = "iteration_limit"
     if stage_progress:
         stage_progress("Starting geometric repair and element-profile search")
+    def start_episode(iteration, local, trigger, budget):
+        episode = {"start_iteration": iteration, "end_iteration": None, "steps": 0,
+                   "trigger": trigger, "reason": None, "before": measure_slack(local),
+                   "after": None, "budget": budget}
+        consolidation_history.append(episode)
+        if stage_progress:
+            stage_progress(f"Starting consolidation at iteration {iteration}: trigger={trigger}; slack={refine_slack:g} A")
+        return episode
+
     for iteration in range(max_iterations+1):
         # All feasibility decisions use the same precision as exported PDB.
         candidate = Structure(structure.atoms, np.round(structure.xyz, 3),
@@ -388,7 +412,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             feasible_iterations.append(iteration)
             if first_feasible is None:
                 first_feasible = iteration
-                slack_first = slack_summary(local, metadata, margin, mode)
+                slack_first = measure_slack(local)
                 if stage_progress and refine_updates and refine_iterations != 0 and status != "valid":
                     stage_progress(f"Geometry feasible at iteration {iteration}; refining per-element profiles "
                                    f"for up to {refine_updates} pushes within remaining search limits")
@@ -406,22 +430,37 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                                    f"total={summary['total_profile_error']:.6f}, "
                                    f"max element={summary['max_element_error']:.6f} ({summary['worst_element']}); "
                                    f"objective={selection_objective}")
+        since_consolidation = profile_updates-last_consolidation_update
+        if (phase == "refine" and geometry["mandatory_pass"] and not rolled_back
+                and reconsolidate_iterations and since_consolidation >= 2 and consolidation_failures <= 3
+                and profile_updates < refine_updates and not controller.stalled and status != "valid"
+                and not (refine_patience and profile_updates-last_improvement_update >= refine_patience)
+                and iteration < max_iterations and time.monotonic()-started < time_limit
+                and push_history and not push_history[-1].get("rollback")):
+            trigger = ("low_acceptance" if reconsolidate_below and push_history[-1].get("acceptance_fraction", 1) < reconsolidate_below
+                       else "periodic" if reconsolidate_every and since_consolidation >= reconsolidate_every else None)
+            if trigger:
+                phase, consolidation_steps = "consolidate", 0
+                consolidation_episode = start_episode(iteration, local, trigger, reconsolidate_iterations)
+                consolidation_previous_count = sum(consolidation_episode["before"][key] for key in
+                                                   ("distance_within_half_slack", "contact_within_half_slack"))
         if first_feasible is not None and geometry["mandatory_pass"] and phase == "repair":
-            phase = "consolidate" if consolidate_iterations and consolidation_failures <= 3 else "refine"
+            resume = consolidation_episode if consolidation_episode and consolidation_episode["reason"] == "interrupted" else None
+            episode_budget = resume["budget"] if resume else consolidate_iterations
+            episode_trigger = resume["trigger"] if resume else "initial"
+            phase = "consolidate" if episode_budget and consolidation_failures <= 3 else "refine"
             if phase == "consolidate":
-                consolidation_episode = {"start_iteration": iteration, "end_iteration": None,
-                                         "steps": 0, "trigger": "initial", "reason": None,
-                                         "before": slack_summary(local, metadata, margin, mode), "after": None}
-                consolidation_history.append(consolidation_episode)
-            if phase == "consolidate" and stage_progress:
-                stage_progress(f"Starting consolidation at iteration {iteration}: slack={refine_slack:g} A")
+                consolidation_episode = start_episode(iteration, local, episode_trigger, episode_budget)
+                consolidation_previous_count = sum(consolidation_episode["before"][key] for key in
+                                                   ("distance_within_half_slack", "contact_within_half_slack"))
         if phase == "consolidate":
             if not geometry["mandatory_pass"]:
                 consolidation_failures += 1
                 consolidation_steps = 0
                 phase = "repair"
-                consolidation_episode.update(end_iteration=iteration, reason="interrupted",
-                                             after=slack_summary(local, metadata, margin, mode))
+                consolidation_episode.update(end_iteration=iteration, reason="interrupted" if consolidation_failures <= 3 else "abandoned",
+                                             after=measure_slack(local))
+                logging.getLogger(__name__).warning("Checked consolidation unexpectedly broke geometry; repairing")
                 if stage_progress:
                     detail = (f"restart {consolidation_failures}/3" if consolidation_failures <= 3
                               else "restart budget exhausted; repair then refine")
@@ -429,18 +468,24 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                     if consolidation_failures > 3:
                         stage_progress(f"Consolidation abandoned at iteration {iteration}; refining without slack after repair")
             else:
-                gaps = slack_summary(local, metadata, margin, mode)
-                ready = all(gaps[k] is None or gaps[k] >= refine_slack/2
-                            for k in ("distance_gap_min_angstrom", "contact_gap_min_angstrom"))
-                if ready or consolidation_steps >= consolidate_iterations:
-                    phase, slack_after = "refine", gaps
-                    consolidation_completed = True
+                gaps = measure_slack(local)
+                counts = [gaps[k] for k in ("distance_within_half_slack", "contact_within_half_slack")]
+                ready = all(count <= consolidate_target*len(structure.atoms) for count in counts)
+                progress_fraction = (consolidation_previous_count-sum(counts))/max(1, consolidation_previous_count)
+                ended = ("target" if ready else "no_progress" if progress_fraction < 0.05
+                         else "iteration_limit" if consolidation_steps >= consolidation_episode["budget"] else None)
+                if consolidation_steps and ended:
+                    phase = "refine"
+                    if consolidation_episode["trigger"] == "initial":
+                        slack_after, consolidation_completed = gaps, True
+                    last_consolidation_update = profile_updates
                     consolidation_episode.update(end_iteration=iteration, after=gaps,
-                                                 reason="target" if ready else "iteration_limit")
+                                                 reason=ended)
                     if stage_progress:
-                        stage_progress(f"Consolidation complete at iteration {iteration}; starting profile refinement")
+                        stage_progress(f"Consolidation complete at iteration {iteration}: {ended}; starting profile refinement")
+                consolidation_previous_count = sum(counts)
         if phase == "refine" and slack_refinement is None:
-            slack_refinement = slack_summary(local, metadata, margin, mode)
+            slack_refinement = measure_slack(local)
         reason = None
         if status == "valid" or (geometry["mandatory_pass"] and (refine_iterations == 0 or refine_updates == 0)):
             reason = "constraints_satisfied"
@@ -480,6 +525,24 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             restored_snapshot = True
             continue
         restored_snapshot = False
+        if phase == "consolidate" and geometry["mandatory_pass"]:
+            near, desired, touching, contact = consolidation_targets(local, metadata, refine_slack, margin, mode)
+            consolidation_force = np.zeros_like(structure.xyz)
+            pair_forces(consolidation_force, candidate.xyz, near, desired, strength=0.3)
+            pair_forces(consolidation_force, candidate.xyz, touching, contact, strength=0.15)
+            norm = np.linalg.norm(consolidation_force, axis=1)
+            consolidation_force *= np.minimum(1, (refine_slack/2)/np.maximum(norm, 1e-12))[:, None]
+            selected = np.unique(np.concatenate([near.ravel(), touching.ravel()]))
+            trial = Structure(structure.atoms, candidate.xyz.copy())
+            update_positions(trial, consolidation_force, groups, mode)
+            accepted, checked = accept_trial(candidate.xyz, trial.xyz, local, metadata, center, edges,
+                                             margin, mode, refine_slack/2, selected_indices=selected)
+            structure.xyz[:] = accepted
+            consolidation_steps += 1
+            consolidation_iterations_total += 1
+            consolidation_episode["steps"] += 1
+            del local, consolidation_force, trial
+            continue
         pieces = {name: np.zeros_like(structure.xyz) for name in
                   ("repair", "bridges", "radial_clip", "centering", "radial_push", "nearest_neighbor")}
         force = pieces["repair"]
@@ -509,13 +572,6 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         clipped = np.clip(radial, edges[0]+0.002, edges[-1]-0.002)
         pieces["radial_clip"][:] = (clipped-radial)[:, None]*direction*0.8
         pieces["centering"][:] = (center-structure.xyz.mean(axis=0))*0.1
-        if phase == "consolidate":
-            near, desired, touching, contact = consolidation_targets(local, metadata, refine_slack, margin, mode)
-            pair_forces(force, structure.xyz, near, desired, strength=0.3)
-            pair_forces(pieces["bridges"], structure.xyz, touching, contact, strength=0.15)
-            consolidation_steps += 1
-            consolidation_iterations_total += 1
-            consolidation_episode["steps"] += 1
         force = sum(pieces.values())
         before_push = None
         # Soft radial transport; rank by current radius for each element.
@@ -526,8 +582,13 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             push_radial = np.linalg.norm(push_offset, axis=1)
             push_direction = push_offset/np.maximum(push_radial, 1e-12)[:, None]
             push_direction[push_radial < 1e-12] = [1, 0, 0]
-            details, selected = apply_radial_push(push_force, push_radial, push_direction, metadata.element_indices, quantiles,
-                                                  controller.strength, refine_max_step, refine_fraction)
+            if refine_selection == "crossing":
+                details, selected = apply_crossing_push(push_force, push_radial, push_direction, metadata.element_indices,
+                                                       profiles, edges, controller.strength, refine_max_step,
+                                                       refine_fraction, refine_min_step, previous_undone)
+            else:
+                details, selected = apply_radial_push(push_force, push_radial, push_direction, metadata.element_indices, quantiles,
+                                                      controller.strength, refine_max_step, refine_fraction, refine_min_step)
             scaled = neighbor_forces == "scaled"
             neighbor_details = characteristic_forces(
                 pieces["nearest_neighbor"], push_source, analysis, metadata, mode=neighbor_forces, margin=margin, guard=refine_slack,
@@ -543,8 +604,9 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             if refine_acceptance == "per-atom":
                 trial = Structure(structure.atoms, candidate.xyz.copy())
                 update_positions(trial, push_force, groups, mode)
-                accepted, checked = accept_trial(candidate.xyz, trial.xyz, local, metadata, center, edges,
-                                                 margin, mode, refine_max_step, selected_indices=selected)
+                accepted, checked, previous_undone = accept_trial(candidate.xyz, trial.xyz, local, metadata, center, edges,
+                                                                 margin, mode, refine_max_step, selected_indices=selected,
+                                                                 return_undone=True)
                 for e, values in checked.pop("per_element").items():
                     details["per_element"].setdefault(e, {}).update(values)
                 crossings = crossing_metrics(push_radial, np.linalg.norm(accepted-center, axis=1),
@@ -570,7 +632,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     controller.finish()
     if consolidation_episode is not None and consolidation_episode["end_iteration"] is None:
         consolidation_episode.update(end_iteration=iteration, reason="search_stopped",
-                                     after=slack_summary(local, metadata, margin, mode))
+                                     after=measure_slack(local))
     last_search_geometry = last_report["geometry"]
     if best is not None:
         output, report = best
@@ -620,6 +682,11 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                        "neighbor_forces": neighbor_forces,
                        "refine_slack_angstrom": refine_slack, "consolidate_iterations": consolidate_iterations,
                        "acceptance": refine_acceptance,
+                       "strength_control": refine_strength_control, "min_step_angstrom": refine_min_step,
+                       "selection": refine_selection,
+                       "consolidate_target": consolidate_target,
+                       "reconsolidate_below": reconsolidate_below, "reconsolidate_every": reconsolidate_every,
+                       "reconsolidate_iterations": reconsolidate_iterations,
                        "big_damage_distance_fraction": rollback_violation_fraction,
                        "big_damage_component_limit": rollback_component_limit}})
     report["initial_transforms"] = rotations

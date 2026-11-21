@@ -10,7 +10,8 @@ from mastercap.cli import main
 from mastercap.constraints import validate_geometry
 from mastercap.generate import search
 from mastercap.model import Atom, MastercapError, Structure
-from mastercap.refinement import AcceptanceController, PushController, apply_radial_push, candidate_key
+from mastercap.refinement import (AcceptanceController, PushController, apply_radial_push,
+                                  apply_crossing_push, candidate_key, bin_inventory)
 
 
 def metrics(c_error, s_error, total):
@@ -99,6 +100,9 @@ def controlled_case(lower=0.1, all_inner=False):
 
 def controlled_search(source, edges, profiles, analysis, **kwargs):
     kwargs.setdefault("consolidate_iterations", 0)
+    kwargs.setdefault("refine_strength_control", "acceptance")
+    kwargs.setdefault("refine_min_step", 0)
+    kwargs.setdefault("refine_selection", "mismatch")
     with patch("mastercap.generate.initialize", return_value=[]), patch("mastercap.generate.characteristic_forces", return_value={}):
         return search(source, analysis, edges, profiles, np.zeros(3), np.random.default_rng(42),
                        time_limit=30, max_iterations=500, **kwargs)
@@ -189,6 +193,7 @@ def test_final_broken_state_is_labeled_and_not_exported(tmp_path, small_pdb, cap
                  "--seed", "42", "--allow-approximate", "--no-smoothing", "--refine-strength", "1000000",
                  "--refine-max-step", "1", "--refine-fraction", "1", "--refine-patience", "0",
                  "--refine-acceptance", "rollback", "--consolidate-iterations", "0", "--rollback-violation-fraction", "0",
+                 "--refine-selection", "mismatch",
                  "--progress-interval", "100"]) == 2
     output = capsys.readouterr().err
     assert "(final search state; not the exported candidate)" in output
@@ -267,9 +272,87 @@ def test_restored_snapshots_do_not_count_as_new_feasible_candidates():
 
 @pytest.mark.parametrize("fraction,expected", [(0.9, 0.00625), (0.6, 0.005), (0.4, 0.0035)])
 def test_acceptance_controller_targets_the_acceptance_band(fraction, expected):
-    controller = AcceptanceController(0.005, [])
+    controller = AcceptanceController(0.005, [], control="acceptance")
     controller.start(0, np.zeros((2, 3)), {"acceptance_fraction": fraction})
     assert controller.strength == pytest.approx(expected)
+
+
+def test_fixed_strength_remains_constant_after_ten_pushes():
+    controller = AcceptanceController(0.005, [], control="fixed")
+    xyz = np.zeros((2, 3))
+    for iteration in range(10):
+        controller.start(iteration, xyz, {"acceptance_fraction": 0.1}, (1, 0, 0, 0))
+        controller.observe(iteration+1, geometry(), xyz, (1, 0, 0, 0))
+    assert controller.strength == 0.005
+    assert not controller.stalled
+
+
+def test_gain_control_reduces_after_two_stalls_and_grows_on_gain():
+    controller = AcceptanceController(0.005, [], control="gain")
+    xyz = np.zeros((2, 3))
+    for iteration in range(2):
+        controller.start(iteration, xyz, {"acceptance_fraction": 0.9}, (1, 0, 0, 0))
+        controller.observe(iteration+1, geometry(), xyz, (1, 0, 0, 0))
+    assert controller.strength == pytest.approx(0.0035)
+    controller.start(2, xyz, {"acceptance_fraction": 0.9}, (1, 0, 0, 0))
+    controller.observe(3, geometry(), xyz, (0.9, 0, 0, 0))
+    assert controller.strength == pytest.approx(0.0035*1.25)
+
+
+def test_minimum_requested_step_survives_tiny_strength():
+    force = np.zeros((4, 3))
+    radial = np.ones(4)
+    direction = np.tile([1.0, 0, 0], (4, 1))
+    _, selected = apply_radial_push(force, radial, direction, {"C": np.arange(4)},
+                                    {"C": radial+np.array([-1, 0, 0.001, 2])},
+                                    1e-12, 0.05, 1, min_step=0.002)
+    assert abs(force[0, 0]) == pytest.approx(0.002)
+    assert force[3, 0] == pytest.approx(0.002)
+    assert force[1, 0] == 0
+
+
+def crossing_case(blocked=None, fraction=1, matched=False):
+    radial = np.array([1.98, 1.99, 1.1, 2.5])
+    edges = np.array([0, 2, 4])
+    profiles = {"C": np.array([3, 1] if matched else [1, 3])/shell_volumes(edges)}
+    force = np.zeros((4, 3))
+    details, selected = apply_crossing_push(force, radial, np.tile([1.0, 0, 0], (4, 1)),
+                                           {"C": np.arange(4)}, profiles, edges, 0.005, 0.05, fraction,
+                                           blocked=blocked)
+    return radial, edges, profiles, force, details, selected
+
+
+def test_crossing_quotas_reduce_l1_count_error_by_twice_the_crossings():
+    radial, edges, profiles, force, details, _ = crossing_case()
+    _, before = bin_inventory(radial, {"C": np.arange(4)}, edges, profiles)
+    _, after = bin_inventory(radial+force[:, 0], {"C": np.arange(4)}, edges, profiles)
+    assert details["per_element"]["C"]["crossing_proposals"] == 2
+    assert np.abs(before["C"][2]).sum()-np.abs(after["C"][2]).sum() == 4
+
+
+def test_matching_bins_propose_no_crossing_or_drift_moves():
+    _, _, _, force, details, selected = crossing_case(matched=True)
+    assert len(selected) == 0
+    assert not force.any()
+    assert details["per_element"]["C"]["crossing_proposals"] == 0
+
+
+def test_previous_rejections_are_skipped_by_crossing_selection():
+    _, _, _, _, details, selected = crossing_case(blocked=np.array([True, False, False, False]))
+    assert 0 not in selected
+    assert details["per_element"]["C"]["crossing_proposals"] == 1
+
+
+def test_drift_uses_remaining_fraction_budget_and_minimum_step():
+    radial = np.array([1, 1.2, 1.4, 2.5])
+    edges = np.array([0, 2, 4])
+    profiles = {"C": np.array([1, 3])/shell_volumes(edges)}
+    force = np.zeros((4, 3))
+    details, selected = apply_crossing_push(force, radial, np.tile([1.0, 0, 0], (4, 1)),
+                                           {"C": np.arange(4)}, profiles, edges, 1e-12, 0.05, 0.5)
+    assert len(selected) == 2
+    assert details["per_element"]["C"]["drift_proposals"] == 2
+    assert np.all(force[selected, 0] == 0.002)
 
 
 @pytest.mark.parametrize("mode", ["independent", "residue"])
@@ -306,7 +389,11 @@ def test_new_options_reject_invalid_values_without_reading_input(option, value):
 @pytest.mark.parametrize("setting", [
     {"refine_slack": -1}, {"refine_slack": float("nan")}, {"consolidate_iterations": -1},
     {"rollback_violation_fraction": -0.1}, {"rollback_violation_fraction": 1.1},
-    {"rollback_component_limit": 0}, {"refine_acceptance": "invalid"}])
+    {"rollback_component_limit": 0}, {"refine_acceptance": "invalid"},
+    {"refine_strength_control": "invalid"}, {"refine_min_step": -1}, {"refine_min_step": 0.1},
+    {"refine_min_step": float("nan")}, {"consolidate_target": 1.1},
+    {"reconsolidate_below": -1}, {"reconsolidate_below": 1.1},
+    {"reconsolidate_every": -1}, {"reconsolidate_iterations": -1}, {"refine_selection": "invalid"}])
 def test_library_rejects_new_invalid_settings(setting):
     source, edges, profiles, analysis = controlled_case()
     with pytest.raises(MastercapError):
