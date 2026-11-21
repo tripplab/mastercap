@@ -48,24 +48,45 @@ atom-weighted total error, then mean element error, then maximum, then count
 difference; `worst-element` restores maximum/mean/total/count ranking. The helper
 and controller live in `refinement.py`; noise-aware selection is not implemented.
 
-Reference neighbor statistics retain their measured values. Analysis separately
-applies canonical, recorded pair-limit overrides and returns the original pooled
-normalized factor. S-S defaults to that factor times 3.60 A: reference sulfur
-spacing is a symmetry/sparsity statistic, not a useful minimum-contact floor.
-Explicit numeric/steric pairs are excluded from statistical neighbor forces;
-reference mode restores the original limit. Validation rebuilds analysis with
-the generation config's effective overrides. A legacy report without override
-records explicitly selects reference limits. No saved-analysis loader exists.
+Reference statistics retain their measured values and pooled normalized factor.
+Canonical override records are separate. `steric` derives a ratio for each element
+from non-overridden, measured (non-fallback) pairs containing that element; use
+the smaller element ratio times the overridden pair's vdW sum. Missing evidence
+requires a numeric override. S-S defaults to 2.786177 A on 1CWP, sourced from C-S.
+`pooled` retains the old formula, but every new override must pass the Pyykko
+single-bond floor, 0.9 times the covalent-radius sum. Numeric values are checked
+before input; derived values after measurement. There is no floor bypass.
+Validation directly applies saved numeric `new_value` records; v0.1.7 steric
+records without ratio emit a warning. Actual sub-floor coordinates still fail
+the final audit. Older reports without override records use reference limits.
+Explicit non-reference override pairs are excluded from statistical neighbor forces.
 
-Optional sulfur-residue initialization selects by S element and anchors the first
-S of each residue. It preserves the existing seed's directions/rotations, then
-assigns shuffled S quantile radii (bin midpoints for regular). Solve the positive
-root of the offset equation for residue-center distance, translating the whole
-rotated residue. Other residues sample aggregate target density minus the placed
-residues' contribution. Off and S-free paths preserve all old RNG draws. Private
-anchor arrays support a 0.05 radial spring before first feasibility only; rigid
-projection applies normally. Reports retain summary counts, target-bin counts,
-S errors and anchor deviations/hit fractions.
+Optional sulfur placement anchors the first S by element, retaining seeded
+rotations. `profile` shuffles quantile radii (regular uses bin midpoints), while
+`reference` uses each atom's own coordinate-derived reference radius through
+inventory provenance, without quantization. Incompatible resized bounds fail
+clearly. A bounded greedy pass exchanges crowded S/non-S directions against
+S-S limit + 2 A, preserving bin counts. Solve the positive-root offset equation
+for the translated whole residue. Remaining residues sample the aggregate target
+minus placed contributions. Off and S-free paths preserve old RNG draws.
+Report distinct radii at 1e-6 A and shells separated by > 0.01 A separately.
+
+The repair-only 0.05 S spring has a configurable 1.5 A dead zone, clipped inside
+the target bin by 0.25 A per edge (quarter-bin padding for narrower bins).
+Collapsed intervals use the nearest safe point. Tolerance 0 is an exact-radius
+comparison; a hidden test-only `--no-sulfur-anchor-spring` switch supports the
+predeclared diagnostic control. No spring acts after first feasibility. Trial
+acceptance and consolidation preserve each anchor's target bin; rigid rejection
+restores the whole residue. Crossing selection also filters out-of-bin anchor
+moves. Private anchor arrays are not JSON. Per-progress repair_history records
+disconnected residue names, violation pair types and anchored participation.
+
+Search metadata separately enforces inter-residue covalent floors; measured
+analysis limits are unchanged. A fresh final pair_distance_audit computes exact
+inter-residue minima with element trees, below-limit/floor counts and atom
+examples, excluding expected same-chain/segment sequential C-N peptide links
+from the floor check. Any actual floor violation is a hard error, including for
+legacy reports. Connectivity audit success alone is not distance validation.
 
 Default crossing selection computes integer bin counts and target counts scaled
 to each element's inventory. Reserve adjacent surplus/deficit crossing quotas,
@@ -214,3 +235,12 @@ isotropy. Regularity describes initialization. Repeated-serial PDBs need VMD tes
 Acceptance at full-capsid scale still requires 1CWP runs: record content hash,
 command, dependencies, hardware, timing, RSS, all constraints, errors and VMD atom
 count. Preserve failure diagnostics and refine the search from measured behavior.
+
+Revision 04 benchmarks use 1800 s and compare best feasible `errors_at_push` at
+10/20/30/40/50 attempts plus the last reached attempt. best_history records the
+cumulative push count, making the checkpoints independent of repair iteration
+count. Record first feasibility, elapsed time, all final errors, both audits and
+standalone validation. A time-limit warning explicitly states that a seed alone
+cannot reproduce clock-limited results. The exact/dead-zone/disabled spring
+comparison is recorded before tuning; do not replace a refuted diagnosis with
+an assumed improvement. See `revision04` in the benchmark evidence.

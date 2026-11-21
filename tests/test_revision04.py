@@ -66,3 +66,13 @@ def test_actual_disconnected_cys_is_reported_as_anchored():
     result=repair_diagnostics(structure,local,metadata,SulfurAnchors(np.array([0]),np.array([1.])),0,0)
     assert result['disconnected_by_residue_name']=={'CYS':1}
     assert result['anchored_disconnected_residues']==1
+
+
+def test_time_limit_warns_that_seed_does_not_reproduce_result(small_structure,caplog):
+    analysis=analyze(small_structure,sigma=0)
+    edges,profiles=target_profiles(analysis)
+    _,report=search(small_structure.copy(),analysis,edges,profiles,analysis.center,np.random.default_rng(42),
+                    time_limit=1e-12)
+    assert report['termination']=='time_limit'
+    assert 'after 0 of 50 pushes' in caplog.text
+    assert 'not reproducible by seed' in caplog.text

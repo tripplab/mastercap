@@ -7,12 +7,14 @@ Particles approximate the radial element density and residue composition of an
 **already expanded, complete protein capsid**. They are for geometry and
 visualization, not chemically valid protein design or molecular dynamics.
 
-Version 0.1.7 adds an independent final connectivity audit, recorded pair-limit
-overrides (S-S=steric by default), and optional reference-derived sulfur-shell
-initialization. Sulfur placement remains off unless explicitly selected.
+Version 0.1.8 adds element-derived steric limits, a covalent floor and independent
+inter-residue distance auditing. Optional sulfur placement has spacing checks,
+a repair-only radial dead zone, refinement bin protection and a reference-radius
+mode. Sulfur placement remains off unless explicitly selected.
 
-**Status:** initial implementation, tested on controlled synthetic structures.
-CCMV 1CWP calibration, full-capsid performance, and VMD compatibility are pending.
+**Status:** geometric prototype with synthetic regression tests and complete
+1CWP benchmarks below. Scientific calibration and broader capsid coverage remain
+pending.
 The bounded heuristic search may fail to find a feasible particle.
 
 ## Installation
@@ -391,7 +393,7 @@ sulfur blockage. That revision-02 scientific gate remains open in the historical
 results; the revision-03 measurements below test a different initialization.
 
 Revision 03 benchmarks compare the measured S-S spacing (`S-S=reference`), the
-new default pooled steric limit, and opt-in sulfur-profile placement. The default
+v0.1.7 pooled steric limit, and opt-in sulfur-profile placement. The default
 placement remains `off`. For an exact v0.1.6 comparison also pass
 `--consolidate-noncontact-slack off`, since consolidation slack is a separate
 changed default. With both compatibility switches, seed 42 reproduces the old
@@ -408,7 +410,7 @@ retains per-element comparisons and stop reasons instead of treating aggregate
 improvement as proof that every element improved.
 
 The unsmoothed v0.1.7 comparisons use the same 1CWP reference, 4 A bins and
-600 s search budget. Both columns use the new S-S steric limit:
+600 s search budget. Both columns use the v0.1.7 pooled S-S limit:
 
 | Seed | Placement off: total / S error | Profile placement: total / S error | Profile pushes | Profile stop |
 |---|---:|---:|---:|---|
@@ -429,6 +431,24 @@ assigned bins. It stopped at the time limit after 40 pushes. Its target differs
 from the unsmoothed cases, so these errors are not a matched smoothing A/B test.
 All eleven revision-03 runs passed both the written-PDB audit and standalone
 validation with their saved distance overrides; outputs remain `uncalibrated`.
+
+For revision-04 benchmarks, give the push budget time to finish:
+
+```bash
+mastercap generate --input ./1cwp_full.vdb.gz --output-prefix results/revision04 \
+  --mode independent --distribution regular --bin-width 4 --no-smoothing \
+  --sulfur-residue-placement profile --sulfur-anchor-tolerance 1.5 \
+  --time-limit 1800 --seed 42 --allow-approximate --csv --plot --overwrite
+```
+
+Compare `search.errors_at_push` at equal 10/20/30/40/50 attempted pushes, plus the
+last reached push. Each checkpoint reports the best feasible total and per-element
+errors, not the potentially damaged last search state. Keep first-feasible
+iteration, total iterations and elapsed seconds separate. A fixed seed controls
+random draws but cannot reproduce how many pushes fit into a wall-clock budget;
+`time_limit` termination emits an explicit warning. `benchmarks/search_shell.py`
+also supports `--time-limit` (default 1800 s) and retains these checkpoints; it
+remains a synthetic timing probe, not independent full-capsid validation.
 
 With `--refine-acceptance rollback`, a full coordinate snapshot is saved before
 each push, including rigid residues. Damage below the configured disaster limits
@@ -473,44 +493,78 @@ radius sums. Fallbacks are reported. Incompatible pairs cannot provide connectio
 
 `--pair-limit-override PAIR=VALUE` is repeatable on analyze, generate and validate.
 Pairs are normalized (N-C and C-N are the same); duplicates and unknown elements
-are errors before input is read. VALUE is a positive finite distance in A,
-`steric` (the pooled normalized fallback times the pair's vdW radius sum), or
-`reference` (retain the measured percentile). **S-S=steric is the default**:
-reference S-S nearest-neighbor spacing reflects rare-element symmetry rather
-than a steric floor. `--pair-limit-override S-S=reference` restores that spacing.
-All other measured pair limits remain unchanged unless explicitly overridden.
-Overrides apply only to pairs represented in the reference, and preserve a
-positive minimum separation. Measured neighbor samples remain unchanged;
-statistical neighbor forces skip pairs with a numeric/steric override.
+are errors before input is read. VALUE is a positive finite distance in A or:
 
-Analysis records `grouped_distance_factor` and `distance_limit_overrides` with
-original/applied values, mode and reason. Generation config saves the effective
-override list. Independent validation reapplies that saved list, regardless of
-its CLI defaults; reports predating override records explicitly use reference
-limits and log that compatibility choice. Analysis is rebuilt from the reference;
-there is no separate saved-analysis loader in this version.
+- `steric`: for each participating element, find its smallest measured limit /
+  vdW-radius-sum ratio among non-overridden pairs without pooled fallback; use
+  the smaller element ratio times this pair's vdW-radius sum. Missing source
+  evidence for an element requires a numeric override.
+- `pooled`: the v0.1.7 global pooled ratio times the vdW-radius sum.
+- `reference`: retain the measured percentile.
+
+**S-S=steric is the default.** On 1CWP it uses C-S's ratio 0.773938 and gives
+**2.786177 A**, replacing the 14.068 A symmetry-spacing statistic. The override
+record includes `ratio` and `source_pair` as well as original/applied values,
+mode and reason. Other measured limits and neighbor samples remain unchanged;
+statistical neighbor forces skip non-reference overridden pairs.
+
+Every new override must be at least `0.9 * (covalent_radius_a + covalent_radius_b)`.
+The fixed single-bond covalent radii use Pyykko/Atsumi (2009); S-S's floor is
+1.854 A. Numeric overrides below the floor fail before input is read. Derived
+steric/pooled/reference limits are checked after reference analysis, since their
+values depend on that input. Thus `S-S=pooled` preserves the old formula but its
+1CWP value of 1.371 A is rejected for new generation. There is no bypass flag.
+
+Independent validation reapplies each saved record's **numeric `new_value`**,
+never the current interpretation of its mode. A v0.1.7 steric record without
+`ratio` produces a compatibility warning and retains its saved 1.371 A limit.
+The final distance audit still rejects actual sub-covalent inter-residue pairs:
+a legacy limit is readable, but does not exempt its coordinates from that check.
+Reports predating override records explicitly use reference limits. Analysis is
+rebuilt from the reference; there is no separate saved-analysis loader.
 
 ### Optional sulfur residue placement
 
 `--sulfur-residue-placement profile` anchors the first S atom in every
-S-containing residue, selected by element rather than residue name. It preserves
-the seed's existing directions and rotations, and assigns volume-quantile S
-radii in a seeded random order. Regular initialization moves these targets to
-bin midpoints; random initialization keeps the quantile radii. Translating the
-whole rotated residue solves the anchor offset so that S, rather than the residue
-centroid, lies at the target radius. This copies the reference's sulfur shells
-by design. Remaining residues sample the aggregate density after subtracting the
-placed residues' atom-density contribution, clipped at zero.
+S-containing residue, selected by element rather than residue name. It retains
+seeded rotations and assigns volume-quantile S radii in a seeded random order;
+regular initialization uses bin midpoints, random uses the quantiles directly.
+A bounded greedy pass swaps crowded S residues' directions with non-S residues'
+directions, targeting separation of S-S limit + 2 A. Each conflict tries at most
+50 seeded candidates; unresolved planned conflicts are counted and warned about.
+The exact positive-root offset equation then places the rotated S atom at its
+target radius. Remaining residues sample aggregate density minus the placed
+residues' contribution. Target radii and bin counts are unchanged by direction swaps.
 
-The default `off` preserves v0.1.6 initialization coordinates and RNG draws.
-With no S, profile mode logs no effect and behaves exactly as off. A summary
-warns about multi-S residues, where only the first S is anchored. A weak 0.05
-radial spring on anchored S acts only before first feasible geometry, through
-the existing rigid projection when requested; checked profile pushes contain
-no anchor spring. `search.sulfur_placement` reports residue counts/names, target
-bin counts, S errors at initialization/first feasibility/final output, anchor
-in-target-bin counts/fractions, first-feasible radial deviations and repair-spring
-statistics. Anchor indices/radii remain private rather than per-atom JSON arrays.
+`--sulfur-residue-placement reference` instead uses each anchored atom's own
+reference radius via its inventory provenance, without midpoint quantization or
+radius shuffling. Those radii must lie within the requested target bounds;
+use profile placement when resizing to incompatible bounds. Reference mode
+preserves the actual coordinate-derived radii. On the uploaded 1CWP file there
+are 45 distinct values rounded to 1e-6 A, forming nine shells with gaps > 0.01 A;
+reports give both counts rather than pretending rounded coordinates have nine
+exactly equal values. Both placement modes copy reference radial structure by design.
+
+`--sulfur-anchor-tolerance` defaults to 1.5 A. Before first feasible geometry,
+a weak 0.05 spring acts only outside `[target - tolerance, target + tolerance]`,
+clipped inside the atom's assigned bin by 0.25 A per edge. Bins narrower than
+1 A use a quarter-bin padding; empty intersections collapse to the nearest
+safe point. Tolerance 0 restores exact-radius anchoring for comparison. The
+spring uses rigid projection in residue mode and stops at first feasibility.
+During consolidation and refinement, checked moves cannot take an anchored S
+out of its assigned bin (`anchor_bin` rejection); crossing selection also filters
+such proposals. No spring acts in trial profile pushes.
+
+The default `off` and S-free paths preserve v0.1.6 initialization coordinates and
+RNG draws. A summary warns about multi-S residues, where only the first S is
+anchored. `search.sulfur_placement` records spacing conflicts, target shells,
+nonzero spring updates, bin rejections, profile errors and anchor-bin retention.
+`repair_history` contains one scalar summary per progress interval: top five
+disconnected residue names and violating element pairs, anchored participation,
+and anchors outside their dead-zone intervals. The first-feasible repair log's
+percentage uses disconnected-residue observations across those samples; it is
+compared with the anchored share of the residue inventory. Private anchor arrays
+are not serialized into JSON.
 
 When contact distance minus minimum separation is nonpositive, consolidation
 now builds full distance-side slack and never applies a contact pull. Positive
@@ -566,6 +620,18 @@ rereads the written PDB and rebuilds its geometry checks.
 ## Acceptance and reports
 
 JSON is mandatory. CSV profiles (`--csv`) and PNG plots (`--plot`) are optional.
+The independent `pair_distance_audit` also uses fresh element trees on the
+reread PDB. For each pair it records the closest atoms in different residues,
+minimum distance, counts below the applied limit and below the covalent floor,
+and bounded examples with atom serial/name and residue identity. The floor
+excludes expected peptide C(i)-N(i+1) links in the same chain and TER segment.
+An actual floor violation is a hard, atom-specific failure before publication;
+`--allow-approximate` cannot bypass it. Generation repair and checked moves
+also enforce inter-residue covalent floors, without altering the measured
+analysis limits. This matters for 1CWP C-O: its measured 1.2196 A bond-scale
+limit is below the 1.242 A floor. An INFO line reports the final inter-residue
+S-S minimum. Standalone validation repeats both audits.
+
 After PDB writing and rereading, `connectivity_audit` builds a fresh contact
 graph independently of the search's local graph/helper. It checks strict positive
 vdW overlap, atom degree, global components and each residue's internal subgraph.
