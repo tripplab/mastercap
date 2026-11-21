@@ -33,6 +33,7 @@ class DetailedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.Raw
         "seed": "generate a seed and record it in JSON",
         "profile_tolerance": "unset (uncalibrated)",
         "composition_tolerance": "unset (uncalibrated)",
+        "refine_iterations": "no additional iteration cap",
     }
 
     def _get_help_string(self, action):
@@ -87,10 +88,18 @@ Workflow and defaults:
   remaining repair time. Individual repair operations can overrun the deadline.
   Progress is printed every 5 iterations and at termination; --progress-interval
   changes this frequency. Stage messages precede input reading and analysis.
-  After first feasible geometry, allow up to --refine-iterations additional
-  steps (default 100) to improve profiles; 0 restores first-feasible stopping.
-  Refinement shares the existing iteration/time budgets, preserves the best
-  feasible candidate and balances relative errors across elements.
+  After first feasible geometry, allow up to --refine-updates profile pushes
+  (default 50). Rolled-back pushes count too. Repair steps are not pushes.
+  --refine-iterations is an optional hard iteration cap, off by default.
+  Either budget set to 0 restores first-feasible stopping. Time/max-iteration
+  limits still apply. --selection-objective total ranks atom-weighted error
+  first; worst-element restores the previous worst-element-first ranking.
+  Pushes target the largest radial mismatches in a fraction of each element
+  (default 0.2), use starting strength 0.005, and cap requested radial moves
+  at 0.05 A. Strength adapts, and excessive damage triggers snapshot rollback.
+  Refinement can stop on patience or strength floor (refinement_stalled).
+  characteristic_forces is unchanged; its contribution shares the overall
+  position-update cap, not the radial-only 0.05 A cap.
 
 Acceptance:
   Always require radial bounds, center error <= 1 A, applicable minimum distances,
@@ -175,6 +184,13 @@ def nonnegative_integer(value):
     return number
 
 
+def positive_fraction(value):
+    number = finite_positive(value)
+    if number > 1:
+        raise argparse.ArgumentTypeError("must be in (0, 1]")
+    return number
+
+
 def parser():
     result = CompleteHelpParser(
         prog="mastercap", formatter_class=DetailedHelpFormatter,
@@ -227,7 +243,14 @@ def parser():
             command.add_argument("--max-iterations", type=int, default=1000, help="Maximum repair steps per attempt; nonnegative, provisional")
             command.add_argument("--time-limit", type=finite_positive, default=300.0, help="Cooperative repair-search budget in seconds, shared with fallback; excludes input, analysis, inventory and initialization")
             command.add_argument("--progress-interval", type=positive_integer, default=5, help="Print search progress every this many iterations, plus initial/final progress; --quiet suppresses progress")
-            command.add_argument("--refine-iterations", type=nonnegative_integer, default=100, help="Additional repair/refinement steps after first mandatory-feasible geometry, sharing time/max-iteration limits; 0 returns the first feasible result; no exact profile-match guarantee")
+            command.add_argument("--refine-iterations", type=nonnegative_integer, default=None, help="Optional cap on all iterations after first feasible geometry, including repair; 0 stops at first feasible geometry")
+            command.add_argument("--selection-objective", choices=("total", "worst-element"), default="total", help="Ranks feasible candidates: total = atom-weighted total profile error (default); worst-element = minimize the worst per-element error first (previous behaviour)")
+            command.add_argument("--refine-updates", type=nonnegative_integer, default=50, help="Profile-push budget, counting rolled-back pushes too; 0 stops at first feasible geometry")
+            command.add_argument("--refine-patience", type=nonnegative_integer, default=10, help="Stop after this many pushes without a significant relative improvement in the primary selection error (0.1 percent); 0 disables patience stopping")
+            command.add_argument("--refine-strength", type=finite_positive, default=0.005, help="Starting radial-push strength; adapts between 1/16 and 4 times this value, stalling if rollback requires a smaller value")
+            command.add_argument("--refine-max-step", type=finite_positive, default=0.05, help="Maximum absolute requested radial profile move per selected atom in A; excludes other forces and rigid projection")
+            command.add_argument("--refine-fraction", type=positive_fraction, default=0.2, help="Fraction of atoms per element selected per push; prioritize largest radial mismatches, round count up; must be in (0, 1]")
+            command.add_argument("--refine-recovery-limit", type=nonnegative_integer, default=10, help="Maximum repair updates after a damaging push before restoring its snapshot; 0 permits no repair updates")
             command.add_argument("--overlap-margin", type=finite_nonnegative, default=0.0, help="Extra required vdW overlap in A; must be nonnegative and tangency never qualifies")
             command.add_argument("--profile-tolerance", type=finite_nonnegative, help="Maximum normalized integrated radial error for EACH element; no scientifically calibrated value")
             command.add_argument("--composition-tolerance", type=finite_nonnegative, help="Relative per-element atom-count error limit, with a minimum one-atom allowance")
@@ -300,8 +323,13 @@ def log_warning_summary(warnings):
 def generate_command(args, analysis, source, acquisition, started, names, preparation_timings=None):
     if args.seed is None:
         args.seed = secrets.randbits(63)
-    if args.seed < 0 or args.max_iterations < 0 or args.refine_iterations < 0:
-        raise MastercapError("Seed, max iterations and refinement steps must be nonnegative")
+    if (args.seed < 0 or args.max_iterations < 0 or (args.refine_iterations is not None and args.refine_iterations < 0)
+            or args.refine_updates < 0 or args.refine_patience < 0 or args.refine_recovery_limit < 0):
+        raise MastercapError("Seed, iteration/update/patience/recovery limits must be nonnegative")
+    if (not np.isfinite([args.refine_strength, args.refine_max_step, args.refine_fraction]).all()
+            or args.refine_strength <= 0 or args.refine_strength > np.finfo(float).max/4
+            or args.refine_max_step <= 0 or not 0 < args.refine_fraction <= 1):
+        raise MastercapError("Refinement strength/max step must be finite and positive; fraction must be in (0, 1]")
     rng = np.random.default_rng(args.seed)
     edges, profiles = target_profiles(analysis, args.inner_radius, args.outer_radius)
     center = analysis.center if args.center == "reference" else np.zeros(3)
@@ -325,11 +353,15 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
         report["residue_inventory"] = trace
         def progress(iteration, geometry, metrics):
             worst = max(m["profile_error"] or 0 for m in metrics["elements"].values())
+            suffix = ""
+            if geometry.get("final_search_state"):
+                suffix = (" (final search state; not the exported candidate)" if geometry.get("export_candidate_available")
+                          else " (final search state; no feasible candidate to export)")
             LOG.info("Iteration %d: components=%d isolated=%d distance violations=%d radial violations=%d "
-                     "disconnected residues=%d center error=%.3f A profile error=%.4f max element error=%.4f", iteration,
+                     "disconnected residues=%d center error=%.3f A profile error=%.4f max element error=%.4f%s", iteration,
                      geometry["global_components"], geometry["isolated_atoms"], geometry["distance_violations"],
                      geometry["outside_radial_bounds"], len(geometry["disconnected_residues"]),
-                     geometry["center_error_angstrom"], metrics["total_profile_error"], worst)
+                     geometry["center_error_angstrom"], metrics["total_profile_error"], worst, suffix)
         mode = args.mode
         def attempt(search_mode):
             attempt_started = time.monotonic()
@@ -341,6 +373,10 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                                          margin=args.overlap_margin, profile_tolerance=args.profile_tolerance,
                                          composition_tolerance=args.composition_tolerance, progress=progress,
                                          progress_interval=args.progress_interval, refine_iterations=args.refine_iterations,
+                                         selection_objective=args.selection_objective, refine_updates=args.refine_updates,
+                                         refine_patience=args.refine_patience, refine_strength=args.refine_strength,
+                                         refine_max_step=args.refine_max_step, refine_fraction=args.refine_fraction,
+                                         refine_recovery_limit=args.refine_recovery_limit,
                                          stage_progress=LOG.info)
             except MastercapError:
                 # Search raises only for invalid settings/templates during prep.
@@ -366,6 +402,11 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
         timings["preparation"] = time.monotonic()-started-timings["search"]
         LOG.info("Preparation %.3f s; repair search %.3f s / %.3f s; termination=%s",
                  timings["preparation"], timings["search"], args.time_limit, search_report.get("termination", "preparation_error"))
+        recoveries = [p["recovery_iterations"] for p in search_report.get("push_history", []) if p.get("recovery_iterations") is not None]
+        LOG.info("Feasible iterations=%d; profile pushes=%d; rollbacks=%d; median repair iterations=%s",
+                 len(search_report.get("feasible_iterations", [])), len(search_report.get("push_history", [])),
+                 search_report.get("rollback_count", 0),
+                 f"{np.median(recoveries):g}" if recoveries else "n/a")
         if particle is None:
             raise MastercapError(f"Search ended ({search_report.get('termination', 'preparation_error')}) without a candidate satisfying every mandatory constraint")
         LOG.info("Selected feasible candidate from iteration %d; preparing PDB export", search_report["candidate_iteration"])
