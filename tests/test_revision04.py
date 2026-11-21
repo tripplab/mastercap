@@ -76,3 +76,32 @@ def test_time_limit_warns_that_seed_does_not_reproduce_result(small_structure,ca
     assert report['termination']=='time_limit'
     assert 'after 0 of 50 pushes' in caplog.text
     assert 'not reproducible by seed' in caplog.text
+
+
+def test_rigid_anchor_rejection_restores_the_whole_residue():
+    from mastercap.refinement import accept_trial
+    source=Structure([Atom('SG','S','CYS',0),Atom('CB','C','CYS',0),Atom('CA','C','ALA',1)],
+                      np.array([[-1.8,0,0],[.2,0,0],[1.6,0,0]]))
+    limits={('C','S'):1.8,('C','C'):1.35}
+    metadata=GeometryMetadata.build(source,limits)
+    local=local_geometry(source,limits,mode='residue',metadata=metadata)
+    trial=source.xyz.copy();trial[:2,0]+=.02
+    accepted,record=accept_trial(source.xyz,trial,local,metadata,np.zeros(3),np.array([0.,1.795,4.]),
+                                 mode='residue',selected_indices=np.array([1]),
+                                 anchor_bins=(np.array([0]),np.array([1])))
+    assert np.array_equal(accepted,source.xyz)
+    assert record['undone_by_reason']['anchor_bin']==1
+    assert record['atoms_undone']==2
+    assert not record['center_rejected']
+
+
+@pytest.mark.parametrize('rigid',[False,True])
+def test_rollback_anchor_guard_uses_pdb_precision(rigid):
+    from mastercap.refinement import restore_anchor_bins
+    snapshot=np.array([[1.799,0,0],[2.999,0,0]])
+    xyz=snapshot.copy();xyz[:,0]+=.0007
+    count=restore_anchor_bins(xyz,snapshot,np.zeros(3),np.array([0.,1.8,4.]),
+                               (np.array([0]),np.array([0])),np.array([0,0]) if rigid else None)
+    assert count==1
+    assert np.array_equal(xyz[0],snapshot[0])
+    assert np.array_equal(xyz[1],snapshot[1]) if rigid else not np.array_equal(xyz[1],snapshot[1])

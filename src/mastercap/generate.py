@@ -15,7 +15,7 @@ from .constraints import GeometryMetadata, local_geometry, validate_geometry, pr
 from .refinement import (PushController, apply_radial_push, candidate_key, error_summary,
                          slack_summary, consolidation_targets, AcceptanceController,
                          accept_trial, force_summary, crossing_metrics, classify_stall, apply_crossing_push)
-from .refinement import errors_at_push, radial_bins
+from .refinement import errors_at_push, radial_bins, restore_anchor_bins
 
 
 def residue_groups(structure):
@@ -832,10 +832,9 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         update_positions(structure, force, groups, mode)
         if before_push is not None:
             if anchor_bins is not None:
-                wrong = anchors.indices[radial_bins(np.linalg.norm(structure.xyz[anchors.indices]-center,axis=1),edges) != anchor_bins[1]]
-                undo = wrong if mode == 'independent' else np.flatnonzero(np.isin(metadata.residues,metadata.residues[wrong]))
-                structure.xyz[undo] = before_push[undo]
-                push_history[-1].setdefault('undone_by_reason',{})['anchor_bin'] = len(wrong)
+                rejected = restore_anchor_bins(structure.xyz,before_push,center,edges,anchor_bins,
+                                               metadata.residues if mode == 'residue' else None)
+                push_history[-1].setdefault('undone_by_reason',{})['anchor_bin'] = rejected
             push_history[-1]["actual_move"] = force_summary(structure.xyz-before_push)
         del local, force, pieces
     controller.finish()

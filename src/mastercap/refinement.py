@@ -563,3 +563,13 @@ def errors_at_push(best_history, push_history):
             result[str(count)] = {k: best[k] for k in ('iteration','total_profile_error','element_errors')}
             result[str(count)]['push_count'] = count
     return result
+
+
+def restore_anchor_bins(xyz, snapshot, center, edges, anchor_bins, residues=None):
+    """Rollback-mode bin protection uses the precision of the next PDB candidate."""
+    indices, target = anchor_bins
+    radial = np.linalg.norm(np.round(xyz[indices],3)-center,axis=1)
+    wrong = indices[radial_bins(radial,edges) != target]
+    undo = wrong if residues is None else np.flatnonzero(np.isin(residues,residues[wrong]))
+    xyz[undo] = snapshot[undo]
+    return len(wrong)
