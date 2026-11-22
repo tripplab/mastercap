@@ -1,13 +1,15 @@
 # mastercap
 
-**Current version: 0.1.9**
+**Current version: 0.1.10**
 
 Reference-driven generation of spherical geometric capsid particles in Python.
 Particles approximate the radial element density and residue composition of an
 **already expanded, complete protein capsid**. They are for geometry and
 visualization, not chemically valid protein design or molecular dynamics.
 
-Version 0.1.9 adds `calibrate`, per-element profile tolerances and explicit
+Version 0.1.10 explains loaded tolerances, per-element acceptance and early stopping
+in the terminal, and includes a calibration plot reading guide. The `calibrate`
+command suggests per-element profile tolerances; generate and validate support
 `--tolerances-from` loading with reference/settings checks. Calibration measures
 radial error scales and suggests thresholds; it never generates a particle or
 relaxes mandatory geometry. Without supplied tolerances, generation remains
@@ -66,7 +68,7 @@ after updating to load the new code.
 
 ## Command-line help
 
-`mastercap -h` (or `mastercap --help`) prints the complete reference for all three
+`mastercap -h` (or `mastercap --help`) prints the complete reference for all four
 commands: every option, its meaning, concrete or inferred/unset defaults, accepted
 choices, units, examples, output files, acceptance rules and exit codes.
 
@@ -76,6 +78,7 @@ For a shorter reference limited to one command, use:
 mastercap analyze -h
 mastercap generate -h
 mastercap validate -h
+mastercap calibrate -h
 mastercap --version
 ```
 
@@ -95,7 +98,15 @@ mastercap analyze --input reference.pdb --output-prefix results/reference --csv 
 # Download a complete VIPERdb capsid into the cache.
 mastercap analyze --id 1cwp --cache-dir .cache/mastercap --output-prefix results/1cwp
 
+# Measure reference-resampling error scales and suggest tolerances (no PDB).
+mastercap calibrate --input reference.pdb --output-prefix results/calib --csv --plot
+
+# Generate using the suggestions; reference, model, bins, smoothing and radii must match.
+mastercap generate --input reference.pdb --output-prefix results/calibrated_particle \
+  --tolerances-from results/calib_calibration.json --seed 42 --csv --plot
+
 # ANALYZE -> GENERATE -> WRITE/REREAD -> VALIDATE in one operation.
+# Without tolerances, explicitly permit an uncalibrated result.
 mastercap generate --input reference.pdb --output-prefix results/particle \
   --seed 42 --allow-approximate --csv --plot
 
@@ -111,8 +122,10 @@ mastercap validate --input reference.pdb --pdb results/particle.pdb \
 mastercap generate -h
 ```
 
-`generate` includes analysis and validation automatically. The other commands
-support analysis alone and independent revalidation. Validation recomputes the
+`generate` includes analysis and validation automatically. `analyze` measures the
+reference, `calibrate` estimates profile error scales and suggests tolerances,
+and `validate` independently rechecks a particle. Calibration is optional and
+must be invoked separately to establish tolerances. Validation recomputes the
 reference analysis, checks hashes and atom provenance, and uses saved settings.
 
 Downloads use `https://viperdb.org/resources/OLIGOMERS/{id}_full.vdb.gz` with TLS
@@ -763,6 +776,38 @@ A reference, model, bin, smoothing or radius mismatch is an error, not a bypass;
 recalibrate. Geometry, connectivity and pair-distance audits remain mandatory
 regardless of the tolerance values.
 
+### Reading the calibration PNG
+
+Each panel shows one element, or the atom-weighted Total, on its **own logarithmic
+error axis**. Read left as smaller error; compare ratios within a panel rather
+than horizontal positions across panels.
+
+- Counting, Orientation and Placement bars span the replicate p05–p95 range;
+  the dot is the mean. These ranges describe replicate variation, not confidence
+  intervals for the mean or proven lower bounds on achievable error.
+- Hollow diamonds are experimental `--compare` **shape** errors. Filled triangles
+  are `--generated` particle errors; up to five receive filename labels.
+- The dashed vertical line is the suggested per-element tolerance, normally
+  `2 × orientation p95`. A triangle at or left of it passes that element's
+  profile threshold. Geometry and composition must still pass separately.
+- Total has no tolerance line or acceptance threshold. A zero error is displayed
+  at a labelled positive position because a logarithmic axis cannot show zero.
+
+A calibration run without `--generated` does **not** assess a subsequently
+generated particle. Its Generated row has no markers. To see particle10 against
+the same baselines, use a distinct prefix and matching profile settings:
+
+```bash
+mastercap calibrate --input ./1cwp_full.vdb --bin-width 4 --no-smoothing \
+  --replicates 50 --seed 42 --generated results/particle10.pdb \
+  --output-prefix results/calib_particle10 --csv --plot
+```
+
+For example, N error 0.1267 is about 1.93 times the reported orientation mean
+0.06583, yet passes the suggested tolerance 0.141. Passing the suggestion means
+meeting the selected rule, not matching the orientation mean. A loose S threshold
+also does not imply that a generated S error must be large: an error of zero passes.
+
 ### First 1CWP calibration
 
 Fifty replicates, seed 42, 4 A bins, no smoothing; means and suggested per-element
@@ -906,6 +951,24 @@ with `*` fallback. Composition allows relative count error with a one-atom
 rounding allowance. Missing tolerances produce `uncalibrated`; exceeding supplied soft
 tolerances produces `approximate`. Both require `--allow-approximate` to save.
 **That flag never relaxes mandatory constraints.**
+
+Terminal output identifies whether tolerances came from a checked calibration
+file, explicit CLI values, or the saved generation report. It prints effective
+per-element values and the composition allowance, then compares each final
+element's error and absolute count difference to its limits. Standalone validation
+can reuse saved values without rereading the original calibration file.
+
+`valid` means mandatory geometry/audits and **every element's** profile and
+composition checks passed. It does not certify chemical validity. Total profile
+error is diagnostic, with no separate acceptance threshold. `--allow-approximate`
+permits saving a soft failure; it does not force an approximate status.
+
+Search stops immediately when all those checks pass, even at the first feasible
+geometry. `--refine-updates` and `--time-limit` are upper limits, not work that
+must be completed. For example, errors C=0.0327, N=0.1267, O=0.0922 and S=0
+all pass tolerances C=0.0753, N=0.141, O=0.113 and S=0.864. If composition also
+passes, that run can finish with **zero profile pushes**. A zero refinement budget
+also stops at first feasible geometry, but does not itself confer valid status.
 
 | Exit code | Meaning |
 |---|---|
