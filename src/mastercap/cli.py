@@ -90,6 +90,46 @@ def configure_tolerances(args,analysis,edges,settings=None,saved=None):
         args.profile_tolerance=check_coverage(args.profile_tolerance,analysis.original,LOG.warning)
         args.tolerance_source='explicit_with_saved_defaults' if saved is not None and explicit else 'saved' if saved is not None else 'explicit'
 
+    if args.tolerance_source == 'calibration':
+        LOG.info('Loaded calibration tolerances: %s (SHA-256 %s); reference/model/bin/smoothing/radii settings matched',
+                 args.calibration_file, args.calibration_sha256)
+    elif args.tolerance_source == 'saved':
+        LOG.info('Using tolerances saved in generation report: %s; original calibration file is not reread', args.report)
+    else:
+        LOG.info('Tolerance source: %s', args.tolerance_source)
+    tolerances = args.profile_tolerance
+    LOG.info('Effective profile tolerances: %s', ', '.join(
+        f"{e}={tolerances.get(e, tolerances.get('*')):.8g}" for e in analysis.original)
+        if tolerances is not None else 'not configured (uncalibrated)')
+    LOG.info('Effective composition tolerance: %s',
+             f'{args.composition_tolerance:.8g} relative; allowance per element = max(1 atom, tolerance * target count)'
+             if args.composition_tolerance is not None else 'not configured (uncalibrated)')
+
+
+def log_acceptance(status, geometry, metrics, composition_tolerance):
+    """Explain the effective checks on the actual exported/validated coordinates."""
+    LOG.info('Mandatory geometry: %s; final connectivity and pair-distance audits completed',
+             'PASS' if geometry['mandatory_pass'] else 'FAIL')
+    for element, values in metrics['elements'].items():
+        tolerance = values['tolerance']
+        profile = 'not configured' if tolerance is None else (
+            f"error={values['profile_error'] or 0:.8g} {'<=' if values['within_tolerance'] else '>'} "
+            f"tolerance={tolerance:.8g} {'PASS' if values['within_tolerance'] else 'FAIL'}")
+        composition = 'not configured'
+        if composition_tolerance is not None:
+            allowance = max(1.0, composition_tolerance * values['target_count'])
+            difference = abs(values['count_difference'])
+            passed = difference <= allowance
+            composition = f"absolute count difference={difference:.8g} {'<=' if passed else '>'} allowance={allowance:.8g} {'PASS' if passed else 'FAIL'}"
+        LOG.info('Acceptance %s: profile %s; composition %s', element, profile, composition)
+    explanations = {
+        'valid': 'mandatory checks passed and every element meets its profile and composition tolerances; Total error is diagnostic, not a separate acceptance threshold',
+        'approximate': 'mandatory checks passed, but at least one element exceeds a supplied tolerance',
+        'uncalibrated': 'mandatory checks passed, but profile and/or composition tolerances are not configured',
+        'failed': 'mandatory geometry failed; soft tolerances cannot permit export',
+    }
+    LOG.info('Acceptance status: %s; %s', status, explanations[status])
+
 
 class DetailedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
     """Show concrete defaults and preserve readable examples and explanations."""
@@ -143,6 +183,9 @@ Input and output:
   symmetry spacing statistic. Repeat --pair-limit-override PAIR=VALUE for a
   positive A value, steric, pooled or reference; S-S=reference restores old behavior.
   Writes PREFIX.json and, when requested, PREFIX_profiles.csv / .png; no PDB.
+  To estimate profile error scales and suggest tolerances, use mastercap calibrate
+  with the intended generation bin width, smoothing and radii; analyze alone does
+  not establish acceptance tolerances.
   Element-inference and other reference warnings stay in JSON, with one terminal
   summary (suppressed by --quiet).""",
     "generate": """Examples:
@@ -163,6 +206,8 @@ Workflow and defaults:
   changes this frequency. Stage messages precede input reading and analysis.
   After first feasible geometry, allow up to --refine-updates profile pushes
   (default 50). Rolled-back pushes count too. Repair steps are not pushes.
+  Stop immediately if mandatory geometry and all supplied tolerances pass;
+  push/time budgets are upper limits, not required work. Zero pushes can be valid.
   --refine-iterations is an optional hard iteration cap, off by default.
   Either budget set to 0 restores first-feasible stopping. Time/max-iteration
   limits still apply. --selection-objective total ranks atom-weighted error
@@ -217,6 +262,9 @@ Acceptance:
   These quality tolerances have no automatic defaults. calibrate suggests values
   from explicit reference resampling; --tolerances-from applies them only when
   reference, model, bin width, smoothing and radii match.
+  Logs show tolerance provenance, effective values and each element's pass/fail.
+  valid means these geometric/profile checks passed, not chemical validation.
+  --allow-approximate permits saving soft failures; it does not force that status.
   --allow-approximate NEVER permits violation of mandatory geometry/connectivity.
 
 Output:
@@ -240,6 +288,7 @@ Validation:
   Writes PREFIX.json and optional PREFIX_profiles.csv / .png; never generates a PDB.
   An uncalibrated status means mandatory checks passed but quality tolerances
   were not supplied; use explicit tolerances or --tolerances-from to reassess profile quality.
+  Logs explain effective tolerances and per-element profile/count pass/fail.
   Plot smoothing follows the effective setting saved in --report.""",
 }
 
@@ -252,7 +301,18 @@ its OWN centroid without moving that centroid. Placement additionally shuffles
 centroid radii. These are resampling baselines, not mandatory geometry checks.
 Suggestions are never applied automatically. Use --tolerances-from explicitly;
 reference, model, bins, smoothing and radii must match. Outputs use the separate
-PREFIX_calibration.json/.csv/.png names. Calibration never generates a PDB."""
+PREFIX_calibration.json/.csv/.png names. Calibration never generates a PDB.
+
+Reading the calibration PNG:
+  Each element has its own log error scale: left is smaller error. Bars span
+  replicate p05-p95; dots show means (not confidence intervals for the mean).
+  Hollow diamonds show --compare shape errors; filled triangles show --generated
+  errors. Without those options the corresponding rows have no sample markers.
+  The dashed line is the suggested per-element tolerance (default 2 * orientation
+  p95); an element's triangle at or left of it passes that profile threshold.
+  Total is diagnostic and has no tolerance. Zero errors use a labelled display
+  position because log(0) is undefined. No particle is assessed unless supplied
+  with --generated; rerun calibrate with that option after generation."""
 
 SMOOTHING_HELP = """
 Smoothing and radial resolution:
@@ -273,7 +333,7 @@ Smoothing and radial resolution:
 
 EXIT_HELP = """
 Exit codes:
-  0    Analysis completed, or generated/validated result passes supplied tolerances.
+  0    Analysis/calibration completed, or generated/validated result passes supplied tolerances.
   1    Input, search, validation or output failure.
   2    Approximate/uncalibrated result saved or verified; also CLI usage errors.
   130  Interrupted.
@@ -329,6 +389,7 @@ def parser():
                     "This help includes ALL command options, defaults and examples below.\n"
                     "Use mastercap COMMAND -h for a shorter, command-specific reference.",
         epilog="Choose analyze, generate, validate or calibrate. generate includes analysis and final validation.\n"
+               "For tolerance-based acceptance, run calibrate separately, then generate --tolerances-from its JSON.\n"
                "Concrete defaults are shown beside options; inferred/unset defaults are explained.\n"
                "Run from an environment where mastercap and its dependencies are installed.\n"+EXIT_HELP)
     result.add_argument("--version", action="version", version=__version__, help="Print the installed mastercap version and exit")
@@ -384,7 +445,7 @@ def parser():
             command.add_argument("--progress-interval", type=positive_integer, default=5, help="Print search progress every this many iterations, plus initial/final progress; --quiet suppresses progress")
             command.add_argument("--refine-iterations", type=nonnegative_integer, default=None, help="Optional cap on all iterations after first feasible geometry, including repair; 0 stops at first feasible geometry")
             command.add_argument("--selection-objective", choices=("total", "worst-element"), default="total", help="Ranks feasible candidates: total = atom-weighted total profile error (default); worst-element = minimize the worst per-element error first (previous behaviour)")
-            command.add_argument("--refine-updates", type=nonnegative_integer, default=50, help="Profile-push budget, counting rolled-back pushes too; 0 stops at first feasible geometry")
+            command.add_argument("--refine-updates", type=nonnegative_integer, default=50, help="Maximum profile pushes, counting rolled-back pushes too; stops earlier when supplied tolerances pass; 0 stops at first feasible geometry")
             command.add_argument("--refine-patience", type=nonnegative_integer, default=10, help="Stop after this many pushes without a significant relative improvement in the primary selection error (0.1 percent); 0 disables patience stopping")
             command.add_argument("--refine-strength", type=finite_positive, default=0.005, help="Radial strength, fixed by default; gain/acceptance controls adapt up to 4x and stall below 1/16; rollback retains damage feedback")
             command.add_argument("--refine-strength-control", choices=("fixed", "gain", "acceptance"), default="fixed", help="Per-atom strength: fixed keeps the starting value; gain follows primary profile improvement; acceptance restores the previous acceptance feedback. Rollback mode retains damage feedback")
@@ -621,6 +682,14 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                  f"{np.median(recoveries):g}" if search_report.get("repair_attempts", 0) else "0 attempted")
         if particle is None:
             raise MastercapError(f"Search ended ({search_report.get('termination', 'preparation_error')}) without a candidate satisfying every mandatory constraint")
+        if search_report.get('termination') == 'constraints_satisfied':
+            if search_report.get('status') == 'valid':
+                LOG.info('Search stopped because mandatory geometry and all supplied profile/composition tolerances passed; '
+                         '%d of %d maximum profile pushes used. Push/time budgets are upper limits, not required work',
+                         search_report.get('profile_updates', 0), args.refine_updates)
+            else:
+                LOG.info('Search stopped at first feasible geometry because a refinement budget was set to 0; quality status=%s',
+                         search_report.get('status'))
         if "S" in profiles:
             LOG.info("Top S too-close rejection pairs: %s", ", ".join(
                 f"{entry['pair']}={entry['count']}" for entry in search_report.get("sulfur_top_rejection_pairs", [])) or "none")
@@ -641,6 +710,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
         metrics = profile_metrics(reread, center, edges, profiles, analysis.original)
         status = acceptance(geometry, metrics, args.profile_tolerance, args.composition_tolerance)
         report.update({"geometry": geometry, "metrics": metrics, "status": status})
+        log_acceptance(status, geometry, metrics, args.composition_tolerance)
         if status == "failed":
             raise MastercapError("Written-and-reread PDB violates mandatory constraints")
         if status != "valid" and not args.allow_approximate:
@@ -744,6 +814,7 @@ def validate_command(args, source, started, names):
         raise
     metrics = profile_metrics(particle, center, edges, profiles, analysis.original)
     status = acceptance(geometry, metrics, config["profile_tolerance"], config["composition_tolerance"])
+    log_acceptance(status, geometry, metrics, config['composition_tolerance'])
     report = base_report(args, started)
     report.update({"status": status, "geometry": geometry, "metrics": metrics, **audit_report,
                    "validated_pdb": str(args.pdb), "reference": analysis.structure.provenance,
@@ -823,7 +894,13 @@ def run(args):
         report.update(status='calibration_complete',calibration=calibration,warnings=analysis.warnings,acquisition=acquisition)
         files={names['json']:encode_json(report)}
         if args.csv:files[names['csv']]=calibration_csv(calibration)
-        if args.plot:files[names['plot']]=calibration_png(calibration)
+        if args.plot:
+            files[names['plot']]=calibration_png(calibration)
+            LOG.info('Calibration PNG: %s; log error scale (left is smaller); bars=p05-p95, dots=means, '
+                     'diamonds=--compare shape errors, triangles=--generated errors, dashed line=suggested tolerance; Total has no threshold', names['plot'])
+            if not args.generated:
+                LOG.info('No generated structures supplied: PNG contains reference resampling baselines only '
+                         '(plus any --compare samples); rerun calibrate with --generated particle.pdb to plot a particle')
         publish(files,args.overwrite,protected)
         LOG.info('Calibration report: %s',names['json'])
         return 0

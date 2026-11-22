@@ -259,6 +259,19 @@ smoothed case has S error 0.001207 against a different target and is recorded
 separately. All outputs remain uncalibrated; the quality gates are explicit
 false values in revision04 rather than hidden by successful validity checks.
 
+The terminal logs tolerance provenance and effective per-element thresholds before
+search or validation. Final acceptance logs compare each element's profile error
+and count difference to the same limits used by acceptance(); Total remains a
+diagnostic. A valid candidate ends search immediately, so refinement/time budgets
+are ceilings, including when no pushes have occurred. Explicit zero budgets also
+stop at first feasible geometry without changing its quality classification.
+Validation reuses saved tolerances without requiring the calibration file.
+
+Calibration plot bars are replicate p05-p95 ranges, dots are means, diamonds are
+comparison shape errors, and triangles are explicitly supplied generated samples.
+The dashed suggestion is a profile-only threshold, not proof of geometry or
+chemical validity. No generated sample is inferred from the output prefix.
+
 Revision 05 adds profile-only calibration. analyze(compute_distances=False) keeps
 the identical selected reference, center, edges and smoothing path while omitting
 all distance inference/override logic. Calibration never changes input coordinates

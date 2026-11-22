@@ -62,7 +62,7 @@ def test_command_help_is_focused_and_complete(command, capsys):
     assert "Exit codes:" in output
     assert "--input" in output and "--id" in output
     assert "default:" in output
-    for other in {"analyze", "generate", "validate"}-{command}:
+    for other in {"analyze", "generate", "validate", "calibrate"}-{command}:
         assert f"usage: mastercap {other}" not in output
     if command == "generate":
         assert "--profile-tolerance" in output and "--inner-radius" in output
@@ -92,7 +92,7 @@ def test_help_displays_changed_parser_defaults_instead_of_static_copies():
 def test_version_matches_project_metadata_and_cli(capsys):
     root = Path(__file__).resolve().parents[1]
     metadata = tomllib.loads((root/"pyproject.toml").read_text())
-    assert __version__ == metadata["project"]["version"] == "0.1.9"
+    assert __version__ == metadata["project"]["version"] == "0.1.10"
     assert f"**Current version: {__version__}**" in (root/"README.md").read_text()
     with pytest.raises(SystemExit) as stopped:
         main(["--version"])
