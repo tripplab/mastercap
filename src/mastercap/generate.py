@@ -469,7 +469,11 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
            refine_strength_control="fixed", refine_min_step=0.002, consolidate_target=0.001,
            reconsolidate_below=0.7, reconsolidate_every=10, reconsolidate_iterations=3,
            refine_selection="crossing", sulfur_residue_placement="off", consolidate_noncontact_slack="on",
-           sulfur_anchor_tolerance=1.5, sulfur_anchor_spring=True):
+           sulfur_anchor_tolerance=1.5, sulfur_anchor_spring=True, target_model="reference", original_profiles=None):
+    if target_model not in ("reference", "step"):
+        raise MastercapError("Target model must be reference or step")
+    if target_model == "step" and sulfur_residue_placement == "reference":
+        raise MastercapError("Sulfur reference placement is incompatible with step targets")
     preparation_started = time.monotonic()
     if not np.isfinite(sulfur_anchor_tolerance) or sulfur_anchor_tolerance < 0:
         raise MastercapError('Sulfur anchor tolerance must be finite and nonnegative')
@@ -572,7 +576,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         local = local_geometry(candidate, analysis.limits, margin, mode, metadata=metadata)
         geometry = validate_geometry(candidate, center, edges, analysis.limits, margin, mode,
                                      local=local, metadata=metadata)
-        metrics = profile_metrics(candidate, center, edges, profiles, analysis.original, metadata=metadata)
+        metrics = profile_metrics(candidate, center, edges, profiles, analysis.original if target_model == "reference" else original_profiles, metadata=metadata)
         if initial_metrics is None:
             initial_metrics = {"total_profile_error": metrics["total_profile_error"], "elements": metrics["elements"]}
             sulfur_initial_error = metrics["elements"].get("S", {}).get("profile_error")

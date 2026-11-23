@@ -5,6 +5,7 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.spatial import cKDTree
 from .model import MastercapError, VDW, guard_override
+from .radial import make_edges, shell_volumes
 
 
 @dataclass
@@ -48,19 +49,6 @@ class Analysis:
                 "distance_limit_overrides": self.distance_limit_overrides,
                 "grouped_distance_factor": self.grouped_distance_factor,
                 "neighbor_samples": self.neighbor_samples}
-
-
-def shell_volumes(edges):
-    return 4 * np.pi / 3 * np.diff(np.asarray(edges) ** 3)
-
-
-def make_edges(inner, outer, width):
-    if not np.isfinite([inner, outer, width]).all() or not 0 <= inner < outer or width <= 0:
-        raise MastercapError("Require finite 0 <= inner radius < outer radius and bin width > 0")
-    n = int(np.ceil((outer - inner) / width))
-    if n > 1_000_000:
-        raise MastercapError("Requested radial resolution exceeds one million bins")
-    return np.linspace(inner, outer, n + 1)
 
 
 def histogram(structure, center, edges, elements, *, atom_elements=None):
@@ -176,7 +164,7 @@ def apply_limit_overrides(limits, grouped, overrides=None, neighbor_samples=None
 
 def analyze(structure, width=1.0, sigma=1.0, radius_method="extrema", percentiles=(0.5, 99.5),
             distance_percentile=1.0, min_samples=100, progress=None, pair_limit_overrides=None,
-            saved_limit_overrides=None, compute_distances=True):
+            saved_limit_overrides=None, compute_distances=True, step_profile=False, step_edge_width=4.0):
     if not np.isfinite([width, sigma]).all() or width <= 0 or sigma < 0:
         raise MastercapError("Bin width must be positive and smoothing sigma nonnegative")
     if progress:
@@ -249,3 +237,73 @@ def target_profiles(analysis, inner=None, outer=None):
     edges = inner + fraction * (outer - inner)
     # Keep the piecewise constant local density; integrate in the NEW shell volumes.
     return edges, {e: p.copy() for e, p in analysis.smoothed.items()}
+
+
+@dataclass
+class Target:
+    edges: np.ndarray
+    profiles: dict
+    reference_on_edges: dict | None
+    step: dict | None = None
+
+
+def build_target(analysis, inner=None, outer=None, *, step=False, edge_width=4.0, bin_width=None):
+    """Single target definition for fitting, generation, calibration and validation."""
+    if not step:
+        edges, profiles = target_profiles(analysis, inner, outer)
+        return Target(edges, profiles, analysis.original)
+    from .step import fit_step, integral, step_profiles, validate_bounds
+    from .model import MASS
+    radii = np.linalg.norm(analysis.structure.xyz-analysis.center, axis=1)
+    elements = analysis.structure.elements
+    width = float(np.diff(analysis.edges)[0]) if bin_width is None else bin_width
+    fit = fit_step(radii, edge_width=edge_width)
+    a, b = fit.inner if inner is None else inner, fit.outer if outer is None else outer
+    validate_bounds(a, b, edge_width)
+    resized = a != fit.inner or b != fit.outer
+    reference_counts = {e: int(np.count_nonzero(elements == e)) for e in analysis.original}
+    ratio = integral(a, b, edge_width)/integral(fit.inner, fit.outer, edge_width)
+    counts = {e: n*ratio for e, n in reference_counts.items()}
+    edges, profiles, densities = step_profiles((a, b, edge_width), counts, width)
+    reference = None if resized else histogram(analysis.structure, analysis.center, edges, analysis.original)
+    def diagnostic(r, **kwargs):
+        try:
+            fitted = fit_step(r, **kwargs)
+            return {k: getattr(fitted, k) for k in ('inner', 'outer', 'thickness')}
+        except MastercapError as exc:
+            return {'error': str(exc)}
+    if np.any(radii == 0):
+        depth_fit = {'error': 'Per-area weights 1/r^2 are undefined at r=0'}
+    else:
+        weights = 1/radii**2
+        depth = float(np.average(radii, weights=weights))
+        thickness = float(np.sqrt(12*np.average((radii-depth)**2, weights=weights)))
+        depth_fit = {'inner': depth-thickness/2, 'outer': depth+thickness/2, 'thickness': thickness}
+    mean = float(radii.mean())
+    variance = float(np.mean((radii-mean)**2))
+    i0 = integral(fit.inner, fit.outer, edge_width)
+    moments = [integral(fit.inner, fit.outer, edge_width, k)/i0 for k in (1, 2, 3)]
+    step_variance = moments[1]-moments[0]**2
+    skew_ref = float(np.mean((radii-mean)**3)/variance**1.5)
+    skew_step = float((moments[2]-3*moments[0]*moments[1]+2*moments[0]**3)/step_variance**1.5)
+    geometric_mean = len(radii)/(4*np.pi/3*(analysis.outer**3-analysis.inner**3))
+    # Rebin at the requested width, independent of any smoothing.
+    reference_hist = histogram(analysis.structure, analysis.center,
+                               make_edges(analysis.inner, analysis.outer, width), analysis.original)
+    maximum = float(sum(reference_hist.values()).max())
+    block = {'model': 'step', 'moments': 'atom', 'edge_width': edge_width, 'fit': fit.report(),
+             'generated_bounds': {'inner': float(a), 'outer': float(b), 'support': [float(edges[0]), float(edges[-1])], 'resized': resized},
+             'counts': {'reference': reference_counts, 'target': counts},
+             'density': {'plateau_total': densities['Total'],
+                         'plateau_by_element': {e: densities[e] for e in counts},
+                         'reference_mean_geometric': geometric_mean, 'reference_max_bin': maximum,
+                         'ratio_to_mean': densities['Total']/geometric_mean,
+                         'ratio_to_max_bin': densities['Total']/maximum},
+             'sensitivity': {'hard': diagnostic(radii, edge_width=0),
+                             'mass': diagnostic(radii, weights=np.array([MASS[e] for e in elements]), edge_width=edge_width),
+                             'depth': depth_fit},
+             'per_element_bounds': {e: diagnostic(radii[elements == e], edge_width=edge_width) for e in counts},
+             'skewness': {'reference': skew_ref, 'step': skew_step, 'difference': skew_step-skew_ref}}
+    if not resized:
+        block['reference_atoms_outside_support'] = int(np.count_nonzero((radii < edges[0]) | (radii > edges[-1])))
+    return Target(edges, profiles, reference, block)

@@ -16,6 +16,11 @@ VDW = {"H": 1.20, "C": 1.70, "N": 1.55, "O": 1.52, "F": 1.47,
 COVALENT = {"H": .32, "C": .75, "N": .71, "O": .63, "F": .64,
             "P": 1.11, "S": 1.03, "CL": .99, "SE": 1.16, "BR": 1.14, "I": 1.33}
 
+# Standard atomic weights (IUPAC conventional values); same finite coverage as VDW.
+MASS = {"H": 1.008, "C": 12.011, "N": 14.007, "O": 15.999, "F": 18.998403163,
+        "P": 30.973761998, "S": 32.06, "CL": 35.45, "SE": 78.971,
+        "BR": 79.904, "I": 126.90447}
+
 
 def covalent_floor(a, b):
     return .9*(COVALENT[a]+COVALENT[b])

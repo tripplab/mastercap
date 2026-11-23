@@ -114420,5 +114420,2463 @@
         "sha256": "08d5656c0fc866faec2891c839065780256c6cc79e322187911ab8d64bce217a"
       }
     }
+  },
+  "step_profile": {
+    "mastercap_version": "0.1.11",
+    "base_commit": "8a15f6b",
+    "reference": {
+      "sha256": "addb99d417b90a28af5e15b8f03f88294a9204d94c16419abf182dae1c6164fc",
+      "model": 1
+    },
+    "reference_file": "1cwp_full.vdb.gz",
+    "fits": {
+      "edge_4": {
+        "model": "step",
+        "moments": "atom",
+        "edge_width": 4.0,
+        "fit": {
+          "inner": 98.56802742782453,
+          "outer": 135.40063385571432,
+          "edge_width": 4.0,
+          "thickness": 36.832606427889786,
+          "support_inner": 96.56802742782453,
+          "support_outer": 137.40063385571432,
+          "target_moments": {
+            "m1": 118.92371144450846,
+            "m2": 14254.259430066535
+          },
+          "model_moments": {
+            "m1": 118.92371144450838,
+            "m2": 14254.25943006653
+          },
+          "residuals": [
+            -5.551115123125783e-16,
+            -3.3306690738754696e-16
+          ],
+          "iterations": 7
+        },
+        "generated_bounds": {
+          "inner": 98.56802742782453,
+          "outer": 135.40063385571432,
+          "support": [
+            96.56802742782453,
+            137.40063385571432
+          ],
+          "resized": false
+        },
+        "counts": {
+          "reference": {
+            "C": 137100,
+            "N": 34620,
+            "O": 42180,
+            "S": 540
+          },
+          "target": {
+            "C": 137100.0,
+            "N": 34620.0,
+            "O": 42180.0,
+            "S": 540.0
+          }
+        },
+        "density": {
+          "plateau_total": 0.03357323546123534,
+          "plateau_by_element": {
+            "C": 0.02146470146304498,
+            "N": 0.005420189384760155,
+            "O": 0.0066038009315188715,
+            "S": 8.45436819113369e-05
+          },
+          "reference_mean_geometric": 0.02191390743058441,
+          "reference_max_bin": 0.04303568762438014,
+          "ratio_to_mean": 1.532051532461,
+          "ratio_to_max_bin": 0.7801254566736787
+        },
+        "sensitivity": {
+          "hard": {
+            "inner": 98.45703204305013,
+            "outer": 135.51068300449083,
+            "thickness": 37.053650961440695
+          },
+          "mass": {
+            "inner": 98.59186653825553,
+            "outer": 135.48568132858756,
+            "thickness": 36.89381479033203
+          },
+          "depth": {
+            "inner": 98.9593821991022,
+            "outer": 135.14844084231987,
+            "thickness": 36.189058643217685
+          }
+        },
+        "per_element_bounds": {
+          "C": {
+            "inner": 98.69219231411513,
+            "outer": 135.01730696457727,
+            "thickness": 36.32511465046214
+          },
+          "N": {
+            "inner": 97.33660839441436,
+            "outer": 135.21825818981142,
+            "thickness": 37.88164979539707
+          },
+          "O": {
+            "inner": 99.27086892174553,
+            "outer": 136.6531456481387,
+            "thickness": 37.38227672639316
+          },
+          "S": {
+            "inner": 105.00050056598843,
+            "outer": 137.04135201037093,
+            "thickness": 32.0408514443825
+          }
+        },
+        "skewness": {
+          "reference": 0.10093150906384213,
+          "step": -0.21263756736763992,
+          "difference": -0.313569076431482
+        },
+        "reference_atoms_outside_support": 9780
+      },
+      "edge_0": {
+        "model": "step",
+        "moments": "atom",
+        "edge_width": 0.0,
+        "fit": {
+          "inner": 98.45703204305013,
+          "outer": 135.51068300449083,
+          "edge_width": 0.0,
+          "thickness": 37.053650961440695,
+          "support_inner": 98.45703204305013,
+          "support_outer": 135.51068300449083,
+          "target_moments": {
+            "m1": 118.92371144450846,
+            "m2": 14254.259430066535
+          },
+          "model_moments": {
+            "m1": 118.92371144450843,
+            "m2": 14254.259430066531
+          },
+          "residuals": [
+            -2.220446049250313e-16,
+            -2.220446049250313e-16
+          ],
+          "iterations": 7
+        },
+        "generated_bounds": {
+          "inner": 98.45703204305013,
+          "outer": 135.51068300449083,
+          "support": [
+            98.45703204305013,
+            135.51068300449083
+          ],
+          "resized": false
+        },
+        "counts": {
+          "reference": {
+            "C": 137100,
+            "N": 34620,
+            "O": 42180,
+            "S": 540
+          },
+          "target": {
+            "C": 137100.0,
+            "N": 34620.0,
+            "O": 42180.0,
+            "S": 540.0
+          }
+        },
+        "density": {
+          "plateau_total": 0.033373154201509145,
+          "plateau_by_element": {
+            "C": 0.021336781575391272,
+            "N": 0.0053878875137858915,
+            "O": 0.006564445272428911,
+            "S": 8.403983990307283e-05
+          },
+          "reference_mean_geometric": 0.02191390743058441,
+          "reference_max_bin": 0.04303568762438014,
+          "ratio_to_mean": 1.5229212000289596,
+          "ratio_to_max_bin": 0.7754762626960543
+        },
+        "sensitivity": {
+          "hard": {
+            "inner": 98.45703204305013,
+            "outer": 135.51068300449083,
+            "thickness": 37.053650961440695
+          },
+          "mass": {
+            "inner": 98.48104685803807,
+            "outer": 135.5955528458491,
+            "thickness": 37.11450598781104
+          },
+          "depth": {
+            "inner": 98.9593821991022,
+            "outer": 135.14844084231987,
+            "thickness": 36.189058643217685
+          }
+        },
+        "per_element_bounds": {
+          "C": {
+            "inner": 98.57973404831712,
+            "outer": 135.12884289147013,
+            "thickness": 36.54910884315301
+          },
+          "N": {
+            "inner": 97.22845624668219,
+            "outer": 135.32538774446743,
+            "thickness": 38.09693149778525
+          },
+          "O": {
+            "inner": 99.1614564964251,
+            "outer": 136.76160685703752,
+            "thickness": 37.60015036061242
+          },
+          "S": {
+            "inner": 104.87402965556909,
+            "outer": 137.16718478635886,
+            "thickness": 32.29315513078977
+          }
+        },
+        "skewness": {
+          "reference": 0.10093150906384213,
+          "step": -0.21782749875635438,
+          "difference": -0.3187590078201965
+        },
+        "reference_atoms_outside_support": 17820
+      }
+    },
+    "calibration": {
+      "full": {
+        "settings": {
+          "reference_hash": "addb99d417b90a28af5e15b8f03f88294a9204d94c16419abf182dae1c6164fc",
+          "reference_filename": "1cwp_full.vdb.gz",
+          "model": 1,
+          "bin_width": 4.0,
+          "smoothing_sigma": 0.0,
+          "inner_radius": 96.56802742782453,
+          "outer_radius": 137.40063385571432,
+          "edges_count": 12,
+          "radius_method": "extrema",
+          "radius_percentiles": [
+            0.5,
+            99.5
+          ],
+          "profile_model": "step",
+          "step_edge_width": 4.0,
+          "replicates": 50,
+          "seed": 42,
+          "mastercap_version": "0.1.11",
+          "sd_ddof": 0
+        },
+        "element_counts": {
+          "C": 137100,
+          "N": 34620,
+          "O": 42180,
+          "S": 540
+        },
+        "target_counts": {
+          "C": 137100.00000000003,
+          "N": 34620.00000000001,
+          "O": 42180.0,
+          "S": 540.0
+        },
+        "levels": {
+          "self": {
+            "C": {
+              "mean": 0.24554446761001547,
+              "sd": 0.0,
+              "p05": 0.24554446761001547,
+              "p50": 0.24554446761001547,
+              "p95": 0.24554446761001547,
+              "min": 0.24554446761001547,
+              "max": 0.24554446761001547
+            },
+            "N": {
+              "mean": 0.1977768322516956,
+              "sd": 0.0,
+              "p05": 0.1977768322516956,
+              "p50": 0.1977768322516956,
+              "p95": 0.1977768322516956,
+              "min": 0.1977768322516956,
+              "max": 0.1977768322516956
+            },
+            "O": {
+              "mean": 0.1936062081667446,
+              "sd": 0.0,
+              "p05": 0.1936062081667446,
+              "p50": 0.1936062081667446,
+              "p95": 0.1936062081667446,
+              "min": 0.1936062081667446,
+              "max": 0.1936062081667446
+            },
+            "S": {
+              "mean": 0.8123901217222548,
+              "sd": 0.0,
+              "p05": 0.8123901217222548,
+              "p50": 0.8123901217222548,
+              "p95": 0.8123901217222548,
+              "min": 0.8123901217222548,
+              "max": 0.8123901217222548
+            },
+            "Total": {
+              "mean": 0.22904393288607597,
+              "sd": 0.0,
+              "p05": 0.22904393288607597,
+              "p50": 0.22904393288607597,
+              "p95": 0.22904393288607597,
+              "min": 0.22904393288607597,
+              "max": 0.22904393288607597
+            }
+          },
+          "counting": {
+            "C": {
+              "mean": 0.006771766093590453,
+              "sd": 0.0016059262465741631,
+              "p05": 0.004619021361537388,
+              "p50": 0.0065550758403283525,
+              "p95": 0.009622823674221735,
+              "min": 0.004120822063362968,
+              "max": 0.010577856744729289
+            },
+            "N": {
+              "mean": 0.012729151574190866,
+              "sd": 0.003078846940417125,
+              "p05": 0.007977888780884188,
+              "p50": 0.013107272971590218,
+              "p95": 0.016960724884200314,
+              "min": 0.005602222769187076,
+              "max": 0.018468920806616294
+            },
+            "O": {
+              "mean": 0.01127652016180228,
+              "sd": 0.0028493929031936007,
+              "p05": 0.0064852913312516275,
+              "p50": 0.011254955411457003,
+              "p95": 0.01604050859493238,
+              "min": 0.005618562305278387,
+              "max": 0.017355070164894862
+            },
+            "S": {
+              "mean": 0.11074821942075566,
+              "sd": 0.02036638615174044,
+              "p05": 0.07824304890175689,
+              "p50": 0.11006168795431233,
+              "p95": 0.1416985120136104,
+              "min": 0.07345723001572009,
+              "max": 0.16765041926375912
+            },
+            "Total": {
+              "mean": 0.00888145876628319,
+              "sd": 0.001192706489823344,
+              "p05": 0.007343081915267508,
+              "p50": 0.00880638898503976,
+              "p95": 0.010922046195433233,
+              "min": 0.00638387692461706,
+              "max": 0.01201968275041275
+            }
+          },
+          "orientation": {
+            "skipped": "not defined for step targets"
+          },
+          "placement": {
+            "skipped": "not defined for step targets"
+          }
+        },
+        "suggested": {
+          "profile_tolerance": {
+            "C": 0.0193,
+            "N": 0.034,
+            "O": 0.0321,
+            "S": 0.284
+          },
+          "composition_tolerance": 0,
+          "basis": "counting",
+          "statistic": "p95",
+          "floor_multiple": 2.0,
+          "rule_by_element": {
+            "C": "floor",
+            "N": "floor",
+            "O": "floor",
+            "S": "floor"
+          },
+          "paste_line": "--profile-tolerance C=0.0193,N=0.0340,O=0.0321,S=0.284 --composition-tolerance 0",
+          "compare_used": false,
+          "tolerances_from_line": "--tolerances-from .cache/revision06/assess_full_calibration.json"
+        }
+      },
+      "half": {
+        "settings": {
+          "reference_hash": "addb99d417b90a28af5e15b8f03f88294a9204d94c16419abf182dae1c6164fc",
+          "reference_filename": "1cwp_full.vdb.gz",
+          "model": 1,
+          "bin_width": 4.0,
+          "smoothing_sigma": 0.0,
+          "inner_radius": 47.284013713912266,
+          "outer_radius": 69.70031692785716,
+          "edges_count": 7,
+          "radius_method": "extrema",
+          "radius_percentiles": [
+            0.5,
+            99.5
+          ],
+          "profile_model": "step",
+          "step_edge_width": 4.0,
+          "replicates": 50,
+          "seed": 42,
+          "mastercap_version": "0.1.11",
+          "sd_ddof": 0
+        },
+        "element_counts": {
+          "C": 137100,
+          "N": 34620,
+          "O": 42180,
+          "S": 540
+        },
+        "target_counts": {
+          "C": 17142.467491965508,
+          "N": 4328.754373244683,
+          "O": 5274.028291838842,
+          "S": 67.51956561386854
+        },
+        "levels": {
+          "self": {
+            "C": {
+              "mean": 1.0,
+              "sd": 0.0,
+              "p05": 1.0,
+              "p50": 1.0,
+              "p95": 1.0,
+              "min": 1.0,
+              "max": 1.0
+            },
+            "N": {
+              "mean": 1.0,
+              "sd": 0.0,
+              "p05": 1.0,
+              "p50": 1.0,
+              "p95": 1.0,
+              "min": 1.0,
+              "max": 1.0
+            },
+            "O": {
+              "mean": 1.0,
+              "sd": 0.0,
+              "p05": 1.0,
+              "p50": 1.0,
+              "p95": 1.0,
+              "min": 1.0,
+              "max": 1.0
+            },
+            "S": {
+              "mean": 1.0,
+              "sd": 0.0,
+              "p05": 1.0,
+              "p50": 1.0,
+              "p95": 1.0,
+              "min": 1.0,
+              "max": 1.0
+            },
+            "Total": {
+              "mean": 1.0,
+              "sd": 0.0,
+              "p05": 1.0,
+              "p50": 1.0,
+              "p95": 1.0,
+              "min": 1.0,
+              "max": 1.0
+            }
+          },
+          "counting": {
+            "C": {
+              "mean": 0.013258324954720868,
+              "sd": 0.00419732353459715,
+              "p05": 0.006679084029599065,
+              "p50": 0.013141891639758839,
+              "p95": 0.01905716000275851,
+              "min": 0.003748548750705638,
+              "max": 0.023705131187948897
+            },
+            "N": {
+              "mean": 0.02632804922229584,
+              "sd": 0.008505786079910826,
+              "p05": 0.01458065767248884,
+              "p50": 0.023963643899155618,
+              "p95": 0.04039285747366696,
+              "min": 0.008647169465696918,
+              "max": 0.05141755763273491
+            },
+            "O": {
+              "mean": 0.02240010345515968,
+              "sd": 0.007242275936739599,
+              "p05": 0.011459365588120694,
+              "p50": 0.02257360804710612,
+              "p95": 0.033455272320709696,
+              "min": 0.006973814050393786,
+              "max": 0.0413100895549352
+            },
+            "S": {
+              "mean": 0.22006669675400847,
+              "sd": 0.06932362802926915,
+              "p05": 0.11591360232113353,
+              "p50": 0.21856652827173487,
+              "p95": 0.3277667028673203,
+              "min": 0.08401802620508264,
+              "max": 0.40335400313254005
+            },
+            "Total": {
+              "mean": 0.01768730551834505,
+              "sd": 0.0034914516652459772,
+              "p05": 0.01193268263119868,
+              "p50": 0.017540752465985902,
+              "p95": 0.023562974102973366,
+              "min": 0.010105581011440722,
+              "max": 0.026044642658840066
+            }
+          },
+          "orientation": {
+            "skipped": "not defined for step targets"
+          },
+          "placement": {
+            "skipped": "not defined for step targets"
+          }
+        },
+        "suggested": {
+          "profile_tolerance": {
+            "C": 0.0382,
+            "N": 0.0808,
+            "O": 0.067,
+            "S": 0.656
+          },
+          "composition_tolerance": 0,
+          "basis": "counting",
+          "statistic": "p95",
+          "floor_multiple": 2.0,
+          "rule_by_element": {
+            "C": "floor",
+            "N": "floor",
+            "O": "floor",
+            "S": "floor"
+          },
+          "paste_line": "--profile-tolerance C=0.0382,N=0.0808,O=0.0670,S=0.656 --composition-tolerance 0",
+          "compare_used": false,
+          "tolerances_from_line": "--tolerances-from .cache/revision06/assess_half_calibration.json"
+        }
+      }
+    },
+    "runs": [
+      {
+        "case": "full",
+        "mastercap_version": "0.1.11",
+        "command": [
+          "mastercap",
+          "generate",
+          "--input",
+          "./1cwp_full.vdb.gz",
+          "--output-prefix",
+          "results/step06_full",
+          "--step-profile",
+          "--bin-width",
+          "4",
+          "--step-edge-width",
+          "4",
+          "--mode",
+          "independent",
+          "--distribution",
+          "regular",
+          "--sulfur-residue-placement",
+          "profile",
+          "--pair-limit-override",
+          "S-S=3.0",
+          "--seed",
+          "42",
+          "--time-limit",
+          "1800",
+          "--max-iterations",
+          "2000",
+          "--refine-updates",
+          "50",
+          "--allow-approximate",
+          "--csv",
+          "--plot",
+          "--tolerances-from",
+          "results/calib_step06_full_calibration.json"
+        ],
+        "target": {
+          "model": "step",
+          "moments": "atom",
+          "edge_width": 4.0,
+          "fit": {
+            "inner": 98.56802742782453,
+            "outer": 135.40063385571432,
+            "edge_width": 4.0,
+            "thickness": 36.832606427889786,
+            "support_inner": 96.56802742782453,
+            "support_outer": 137.40063385571432,
+            "target_moments": {
+              "m1": 118.92371144450846,
+              "m2": 14254.259430066535
+            },
+            "model_moments": {
+              "m1": 118.92371144450838,
+              "m2": 14254.25943006653
+            },
+            "residuals": [
+              -5.551115123125783e-16,
+              -3.3306690738754696e-16
+            ],
+            "iterations": 7
+          },
+          "generated_bounds": {
+            "inner": 98.56802742782453,
+            "outer": 135.40063385571432,
+            "support": [
+              96.56802742782453,
+              137.40063385571432
+            ],
+            "resized": false
+          },
+          "counts": {
+            "reference": {
+              "C": 137100,
+              "N": 34620,
+              "O": 42180,
+              "S": 540
+            },
+            "target": {
+              "C": 137100.0,
+              "N": 34620.0,
+              "O": 42180.0,
+              "S": 540.0
+            }
+          },
+          "density": {
+            "plateau_total": 0.03357323546123534,
+            "plateau_by_element": {
+              "C": 0.02146470146304498,
+              "N": 0.005420189384760155,
+              "O": 0.0066038009315188715,
+              "S": 8.45436819113369e-05
+            },
+            "reference_mean_geometric": 0.02191390743058441,
+            "reference_max_bin": 0.04303568762438014,
+            "ratio_to_mean": 1.532051532461,
+            "ratio_to_max_bin": 0.7801254566736787
+          },
+          "sensitivity": {
+            "hard": {
+              "inner": 98.45703204305013,
+              "outer": 135.51068300449083,
+              "thickness": 37.053650961440695
+            },
+            "mass": {
+              "inner": 98.59186653825553,
+              "outer": 135.48568132858756,
+              "thickness": 36.89381479033203
+            },
+            "depth": {
+              "inner": 98.9593821991022,
+              "outer": 135.14844084231987,
+              "thickness": 36.189058643217685
+            }
+          },
+          "per_element_bounds": {
+            "C": {
+              "inner": 98.69219231411513,
+              "outer": 135.01730696457727,
+              "thickness": 36.32511465046214
+            },
+            "N": {
+              "inner": 97.33660839441436,
+              "outer": 135.21825818981142,
+              "thickness": 37.88164979539707
+            },
+            "O": {
+              "inner": 99.27086892174553,
+              "outer": 136.6531456481387,
+              "thickness": 37.38227672639316
+            },
+            "S": {
+              "inner": 105.00050056598843,
+              "outer": 137.04135201037093,
+              "thickness": 32.0408514443825
+            }
+          },
+          "skewness": {
+            "reference": 0.10093150906384213,
+            "step": -0.21263756736763992,
+            "difference": -0.313569076431482
+          },
+          "reference_atoms_outside_support": 9780
+        },
+        "status": "valid",
+        "pdb_sha256": "221d7e1a6b271da3074eaf25b6be2aad0524a7c1eb8d9e0c64c5f46774ae8a1f",
+        "atom_count": 214440,
+        "element_counts": {
+          "C": 137100,
+          "N": 34620,
+          "O": 42180,
+          "S": 540
+        },
+        "errors": {
+          "C": 0.0161626041911506,
+          "N": 0.024365618191331654,
+          "O": 0.032087705844687134,
+          "S": 0.007132575375382248
+        },
+        "total_profile_error": 0.020596631969885558,
+        "multiples_counting": {
+          "C": 2.386763507151948,
+          "N": 1.9141588541324652,
+          "O": 2.8455326097300824,
+          "S": 0.06440352190480013,
+          "Total": 2.319059572519421
+        },
+        "tolerances_used": {
+          "profile": {
+            "C": 0.0193,
+            "N": 0.034,
+            "O": 0.0321,
+            "S": 0.284
+          },
+          "composition": 0.0,
+          "calibration_sha256": "c8c3e38910cd49a6070749eb5cd965c638f68754b0740881482c474483068aff"
+        },
+        "search": {
+          "termination": "constraints_satisfied",
+          "first_feasible_iteration": 57,
+          "iterations": 77,
+          "candidate_iteration": 77,
+          "profile_updates": 10,
+          "elapsed_seconds": 152.4930749110008,
+          "errors_at_push": {
+            "10": {
+              "iteration": 77,
+              "total_profile_error": 0.020596631969885558,
+              "element_errors": {
+                "C": 0.0161626041911506,
+                "N": 0.024365618191331654,
+                "O": 0.032087705844687134,
+                "S": 0.007132575375382248
+              },
+              "push_count": 10
+            }
+          },
+          "mean_acceptance_fraction": 0.9176646148106695,
+          "committed_pushes": 10
+        },
+        "timings_seconds": {
+          "reference": 0.00011465800162113737,
+          "analysis": 4.03501235099975,
+          "inventory": 1.196438663999288,
+          "initialization": 1.1095341149994056,
+          "search": 152.4930749110008,
+          "export_validation": 17.719376719000138,
+          "preparation": 6.775232518000848
+        },
+        "elapsed_seconds": 176.98793530900002,
+        "runtime": {
+          "python": "3.12.14",
+          "numpy": "2.3.5",
+          "scipy": "1.17.0"
+        },
+        "peak_rss_mib": 865.55078125,
+        "connectivity_audit": {
+          "atom_count": 214440,
+          "edge_count": 879710,
+          "isolated_atoms": 0,
+          "isolated_atom_examples": [],
+          "global_components": 1,
+          "largest_component_sizes": [
+            214440
+          ],
+          "small_component_atoms": [],
+          "component_representatives": [
+            {
+              "index": 0,
+              "serial": 1,
+              "atom_name": "N",
+              "residue_name": "LYS",
+              "residue_number": "1",
+              "residue_index": 0,
+              "chain": "A",
+              "segment": 0,
+              "element": "N"
+            }
+          ],
+          "disconnected_residues": 0,
+          "disconnected_residue_examples": [],
+          "passed": true
+        },
+        "pair_distance_audit": {
+          "pairs": {
+            "C-C": {
+              "minimum_distance_angstrom": 1.3559221954079814,
+              "closest_atoms": [
+                {
+                  "index": 66729,
+                  "serial": 66730,
+                  "atom_name": "CB",
+                  "residue_name": "VAL",
+                  "residue_number": "8906",
+                  "residue_index": 8905,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "C"
+                },
+                {
+                  "index": 78203,
+                  "serial": 3303,
+                  "atom_name": "CG",
+                  "residue_name": "MET",
+                  "residue_number": "442",
+                  "residue_index": 10440,
+                  "chain": "B",
+                  "segment": 1,
+                  "element": "C"
+                }
+              ],
+              "limit_angstrom": 1.353125640877449,
+              "covalent_floor_angstrom": 1.35,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "C-N": {
+              "minimum_distance_angstrom": 1.3186204912710817,
+              "closest_atoms": [
+                {
+                  "index": 97945,
+                  "serial": 23045,
+                  "atom_name": "CB",
+                  "residue_name": "ILE",
+                  "residue_number": "3075",
+                  "residue_index": 13073,
+                  "chain": "B",
+                  "segment": 1,
+                  "element": "C"
+                },
+                {
+                  "index": 45336,
+                  "serial": 45337,
+                  "atom_name": "N",
+                  "residue_name": "GLY",
+                  "residue_number": "6052",
+                  "residue_index": 6051,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "N"
+                }
+              ],
+              "limit_angstrom": 1.3161189155999518,
+              "covalent_floor_angstrom": 1.314,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "C-O": {
+              "minimum_distance_angstrom": 1.2450000000000037,
+              "closest_atoms": [
+                {
+                  "index": 29542,
+                  "serial": 29543,
+                  "atom_name": "CG2",
+                  "residue_name": "ILE",
+                  "residue_number": "3945",
+                  "residue_index": 3944,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "C"
+                },
+                {
+                  "index": 162848,
+                  "serial": 13031,
+                  "atom_name": "O",
+                  "residue_name": "GLN",
+                  "residue_number": "1739",
+                  "residue_index": 21736,
+                  "chain": "C",
+                  "segment": 2,
+                  "element": "O"
+                }
+              ],
+              "limit_angstrom": 1.2196351913584664,
+              "covalent_floor_angstrom": 1.242,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "C-S": {
+              "minimum_distance_angstrom": 2.7116255272437684,
+              "closest_atoms": [
+                {
+                  "index": 66729,
+                  "serial": 66730,
+                  "atom_name": "CB",
+                  "residue_name": "VAL",
+                  "residue_number": "8906",
+                  "residue_index": 8905,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "C"
+                },
+                {
+                  "index": 78204,
+                  "serial": 3304,
+                  "atom_name": "SD",
+                  "residue_name": "MET",
+                  "residue_number": "442",
+                  "residue_index": 10440,
+                  "chain": "B",
+                  "segment": 1,
+                  "element": "S"
+                }
+              ],
+              "limit_angstrom": 2.708783490794347,
+              "covalent_floor_angstrom": 1.602,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "N-N": {
+              "minimum_distance_angstrom": 2.14670025853635,
+              "closest_atoms": [
+                {
+                  "index": 27579,
+                  "serial": 27580,
+                  "atom_name": "NE1",
+                  "residue_name": "TRP",
+                  "residue_number": "3681",
+                  "residue_index": 3680,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "N"
+                },
+                {
+                  "index": 140980,
+                  "serial": 66080,
+                  "atom_name": "N",
+                  "residue_name": "VAL",
+                  "residue_number": "8818",
+                  "residue_index": 18816,
+                  "chain": "B",
+                  "segment": 1,
+                  "element": "N"
+                }
+              ],
+              "limit_angstrom": 2.143693308288291,
+              "covalent_floor_angstrom": 1.278,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "N-O": {
+              "minimum_distance_angstrom": 2.2225098424978906,
+              "closest_atoms": [
+                {
+                  "index": 27346,
+                  "serial": 27347,
+                  "atom_name": "N",
+                  "residue_name": "VAL",
+                  "residue_number": "3651",
+                  "residue_index": 3650,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "N"
+                },
+                {
+                  "index": 22748,
+                  "serial": 22749,
+                  "atom_name": "OG",
+                  "residue_name": "SER",
+                  "residue_number": "3036",
+                  "residue_index": 3035,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "O"
+                }
+              ],
+              "limit_angstrom": 2.2195013020768433,
+              "covalent_floor_angstrom": 1.206,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "N-S": {
+              "minimum_distance_angstrom": 3.0829638337158576,
+              "closest_atoms": [
+                {
+                  "index": 130336,
+                  "serial": 55436,
+                  "atom_name": "N",
+                  "residue_name": "VAL",
+                  "residue_number": "7397",
+                  "residue_index": 17395,
+                  "chain": "B",
+                  "segment": 1,
+                  "element": "N"
+                },
+                {
+                  "index": 21941,
+                  "serial": 21942,
+                  "atom_name": "SG",
+                  "residue_name": "CYS",
+                  "residue_number": "2929",
+                  "residue_index": 2928,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "S"
+                }
+              ],
+              "limit_angstrom": 3.0799550321392744,
+              "covalent_floor_angstrom": 1.566,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "O-O": {
+              "minimum_distance_angstrom": 2.1709541681021265,
+              "closest_atoms": [
+                {
+                  "index": 73525,
+                  "serial": 73526,
+                  "atom_name": "O",
+                  "residue_name": "ASP",
+                  "residue_number": "9816",
+                  "residue_index": 9815,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "O"
+                },
+                {
+                  "index": 121072,
+                  "serial": 46172,
+                  "atom_name": "O",
+                  "residue_name": "VAL",
+                  "residue_number": "6163",
+                  "residue_index": 16161,
+                  "chain": "B",
+                  "segment": 1,
+                  "element": "O"
+                }
+              ],
+              "limit_angstrom": 2.1679404973384337,
+              "covalent_floor_angstrom": 1.1340000000000001,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "O-S": {
+              "minimum_distance_angstrom": 3.470254457529007,
+              "closest_atoms": [
+                {
+                  "index": 31938,
+                  "serial": 31939,
+                  "atom_name": "O",
+                  "residue_name": "ALA",
+                  "residue_number": "4265",
+                  "residue_index": 4264,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "O"
+                },
+                {
+                  "index": 12445,
+                  "serial": 12446,
+                  "atom_name": "SG",
+                  "residue_name": "CYS",
+                  "residue_number": "1662",
+                  "residue_index": 1661,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "S"
+                }
+              ],
+              "limit_angstrom": 3.4671638265302653,
+              "covalent_floor_angstrom": 1.4940000000000002,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "S-S": {
+              "minimum_distance_angstrom": 3.006089819017382,
+              "closest_atoms": [
+                {
+                  "index": 173476,
+                  "serial": 23659,
+                  "atom_name": "SD",
+                  "residue_name": "MET",
+                  "residue_number": "3158",
+                  "residue_index": 23155,
+                  "chain": "C",
+                  "segment": 2,
+                  "element": "S"
+                },
+                {
+                  "index": 178075,
+                  "serial": 28258,
+                  "atom_name": "SG",
+                  "residue_name": "CYS",
+                  "residue_number": "3770",
+                  "residue_index": 23767,
+                  "chain": "C",
+                  "segment": 2,
+                  "element": "S"
+                }
+              ],
+              "limit_angstrom": 3.0,
+              "covalent_floor_angstrom": 1.854,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            }
+          },
+          "below_limit_count": 0,
+          "below_covalent_floor_count": 0,
+          "passed": true
+        },
+        "validation": {
+          "status": "valid",
+          "mandatory_pass": true,
+          "connectivity_audit": {
+            "atom_count": 214440,
+            "edge_count": 879710,
+            "isolated_atoms": 0,
+            "isolated_atom_examples": [],
+            "global_components": 1,
+            "largest_component_sizes": [
+              214440
+            ],
+            "small_component_atoms": [],
+            "component_representatives": [
+              {
+                "index": 0,
+                "serial": 1,
+                "atom_name": "N",
+                "residue_name": "LYS",
+                "residue_number": "1",
+                "residue_index": 0,
+                "chain": "A",
+                "segment": 0,
+                "element": "N"
+              }
+            ],
+            "disconnected_residues": 0,
+            "disconnected_residue_examples": [],
+            "passed": true
+          },
+          "pair_distance_audit": {
+            "pairs": {
+              "C-C": {
+                "minimum_distance_angstrom": 1.3559221954079814,
+                "closest_atoms": [
+                  {
+                    "index": 66729,
+                    "serial": 66730,
+                    "atom_name": "CB",
+                    "residue_name": "VAL",
+                    "residue_number": "8906",
+                    "residue_index": 8905,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "C"
+                  },
+                  {
+                    "index": 78203,
+                    "serial": 3303,
+                    "atom_name": "CG",
+                    "residue_name": "MET",
+                    "residue_number": "442",
+                    "residue_index": 10440,
+                    "chain": "B",
+                    "segment": 1,
+                    "element": "C"
+                  }
+                ],
+                "limit_angstrom": 1.353125640877449,
+                "covalent_floor_angstrom": 1.35,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "C-N": {
+                "minimum_distance_angstrom": 1.3186204912710817,
+                "closest_atoms": [
+                  {
+                    "index": 97945,
+                    "serial": 23045,
+                    "atom_name": "CB",
+                    "residue_name": "ILE",
+                    "residue_number": "3075",
+                    "residue_index": 13073,
+                    "chain": "B",
+                    "segment": 1,
+                    "element": "C"
+                  },
+                  {
+                    "index": 45336,
+                    "serial": 45337,
+                    "atom_name": "N",
+                    "residue_name": "GLY",
+                    "residue_number": "6052",
+                    "residue_index": 6051,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "N"
+                  }
+                ],
+                "limit_angstrom": 1.3161189155999518,
+                "covalent_floor_angstrom": 1.314,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "C-O": {
+                "minimum_distance_angstrom": 1.2450000000000037,
+                "closest_atoms": [
+                  {
+                    "index": 29542,
+                    "serial": 29543,
+                    "atom_name": "CG2",
+                    "residue_name": "ILE",
+                    "residue_number": "3945",
+                    "residue_index": 3944,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "C"
+                  },
+                  {
+                    "index": 162848,
+                    "serial": 13031,
+                    "atom_name": "O",
+                    "residue_name": "GLN",
+                    "residue_number": "1739",
+                    "residue_index": 21736,
+                    "chain": "C",
+                    "segment": 2,
+                    "element": "O"
+                  }
+                ],
+                "limit_angstrom": 1.2196351913584664,
+                "covalent_floor_angstrom": 1.242,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "C-S": {
+                "minimum_distance_angstrom": 2.7116255272437684,
+                "closest_atoms": [
+                  {
+                    "index": 66729,
+                    "serial": 66730,
+                    "atom_name": "CB",
+                    "residue_name": "VAL",
+                    "residue_number": "8906",
+                    "residue_index": 8905,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "C"
+                  },
+                  {
+                    "index": 78204,
+                    "serial": 3304,
+                    "atom_name": "SD",
+                    "residue_name": "MET",
+                    "residue_number": "442",
+                    "residue_index": 10440,
+                    "chain": "B",
+                    "segment": 1,
+                    "element": "S"
+                  }
+                ],
+                "limit_angstrom": 2.708783490794347,
+                "covalent_floor_angstrom": 1.602,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "N-N": {
+                "minimum_distance_angstrom": 2.14670025853635,
+                "closest_atoms": [
+                  {
+                    "index": 27579,
+                    "serial": 27580,
+                    "atom_name": "NE1",
+                    "residue_name": "TRP",
+                    "residue_number": "3681",
+                    "residue_index": 3680,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "N"
+                  },
+                  {
+                    "index": 140980,
+                    "serial": 66080,
+                    "atom_name": "N",
+                    "residue_name": "VAL",
+                    "residue_number": "8818",
+                    "residue_index": 18816,
+                    "chain": "B",
+                    "segment": 1,
+                    "element": "N"
+                  }
+                ],
+                "limit_angstrom": 2.143693308288291,
+                "covalent_floor_angstrom": 1.278,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "N-O": {
+                "minimum_distance_angstrom": 2.2225098424978906,
+                "closest_atoms": [
+                  {
+                    "index": 27346,
+                    "serial": 27347,
+                    "atom_name": "N",
+                    "residue_name": "VAL",
+                    "residue_number": "3651",
+                    "residue_index": 3650,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "N"
+                  },
+                  {
+                    "index": 22748,
+                    "serial": 22749,
+                    "atom_name": "OG",
+                    "residue_name": "SER",
+                    "residue_number": "3036",
+                    "residue_index": 3035,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "O"
+                  }
+                ],
+                "limit_angstrom": 2.2195013020768433,
+                "covalent_floor_angstrom": 1.206,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "N-S": {
+                "minimum_distance_angstrom": 3.0829638337158576,
+                "closest_atoms": [
+                  {
+                    "index": 130336,
+                    "serial": 55436,
+                    "atom_name": "N",
+                    "residue_name": "VAL",
+                    "residue_number": "7397",
+                    "residue_index": 17395,
+                    "chain": "B",
+                    "segment": 1,
+                    "element": "N"
+                  },
+                  {
+                    "index": 21941,
+                    "serial": 21942,
+                    "atom_name": "SG",
+                    "residue_name": "CYS",
+                    "residue_number": "2929",
+                    "residue_index": 2928,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "S"
+                  }
+                ],
+                "limit_angstrom": 3.0799550321392744,
+                "covalent_floor_angstrom": 1.566,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "O-O": {
+                "minimum_distance_angstrom": 2.1709541681021265,
+                "closest_atoms": [
+                  {
+                    "index": 73525,
+                    "serial": 73526,
+                    "atom_name": "O",
+                    "residue_name": "ASP",
+                    "residue_number": "9816",
+                    "residue_index": 9815,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "O"
+                  },
+                  {
+                    "index": 121072,
+                    "serial": 46172,
+                    "atom_name": "O",
+                    "residue_name": "VAL",
+                    "residue_number": "6163",
+                    "residue_index": 16161,
+                    "chain": "B",
+                    "segment": 1,
+                    "element": "O"
+                  }
+                ],
+                "limit_angstrom": 2.1679404973384337,
+                "covalent_floor_angstrom": 1.1340000000000001,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "O-S": {
+                "minimum_distance_angstrom": 3.470254457529007,
+                "closest_atoms": [
+                  {
+                    "index": 31938,
+                    "serial": 31939,
+                    "atom_name": "O",
+                    "residue_name": "ALA",
+                    "residue_number": "4265",
+                    "residue_index": 4264,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "O"
+                  },
+                  {
+                    "index": 12445,
+                    "serial": 12446,
+                    "atom_name": "SG",
+                    "residue_name": "CYS",
+                    "residue_number": "1662",
+                    "residue_index": 1661,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "S"
+                  }
+                ],
+                "limit_angstrom": 3.4671638265302653,
+                "covalent_floor_angstrom": 1.4940000000000002,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "S-S": {
+                "minimum_distance_angstrom": 3.006089819017382,
+                "closest_atoms": [
+                  {
+                    "index": 173476,
+                    "serial": 23659,
+                    "atom_name": "SD",
+                    "residue_name": "MET",
+                    "residue_number": "3158",
+                    "residue_index": 23155,
+                    "chain": "C",
+                    "segment": 2,
+                    "element": "S"
+                  },
+                  {
+                    "index": 178075,
+                    "serial": 28258,
+                    "atom_name": "SG",
+                    "residue_name": "CYS",
+                    "residue_number": "3770",
+                    "residue_index": 23767,
+                    "chain": "C",
+                    "segment": 2,
+                    "element": "S"
+                  }
+                ],
+                "limit_angstrom": 3.0,
+                "covalent_floor_angstrom": 1.854,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              }
+            },
+            "below_limit_count": 0,
+            "below_covalent_floor_count": 0,
+            "passed": true
+          },
+          "metrics_match": true
+        }
+      },
+      {
+        "case": "half",
+        "mastercap_version": "0.1.11",
+        "command": [
+          "mastercap",
+          "generate",
+          "--input",
+          "./1cwp_full.vdb.gz",
+          "--output-prefix",
+          "results/step06_half",
+          "--step-profile",
+          "--bin-width",
+          "4",
+          "--step-edge-width",
+          "4",
+          "--mode",
+          "independent",
+          "--distribution",
+          "regular",
+          "--sulfur-residue-placement",
+          "profile",
+          "--pair-limit-override",
+          "S-S=3.0",
+          "--seed",
+          "42",
+          "--time-limit",
+          "1800",
+          "--max-iterations",
+          "2000",
+          "--refine-updates",
+          "50",
+          "--allow-approximate",
+          "--csv",
+          "--plot",
+          "--tolerances-from",
+          "results/calib_step06_half_calibration.json",
+          "--inner-radius",
+          "49.284013713912266",
+          "--outer-radius",
+          "67.70031692785716"
+        ],
+        "target": {
+          "model": "step",
+          "moments": "atom",
+          "edge_width": 4.0,
+          "fit": {
+            "inner": 98.56802742782453,
+            "outer": 135.40063385571432,
+            "edge_width": 4.0,
+            "thickness": 36.832606427889786,
+            "support_inner": 96.56802742782453,
+            "support_outer": 137.40063385571432,
+            "target_moments": {
+              "m1": 118.92371144450846,
+              "m2": 14254.259430066535
+            },
+            "model_moments": {
+              "m1": 118.92371144450838,
+              "m2": 14254.25943006653
+            },
+            "residuals": [
+              -5.551115123125783e-16,
+              -3.3306690738754696e-16
+            ],
+            "iterations": 7
+          },
+          "generated_bounds": {
+            "inner": 49.284013713912266,
+            "outer": 67.70031692785716,
+            "support": [
+              47.284013713912266,
+              69.70031692785716
+            ],
+            "resized": true
+          },
+          "counts": {
+            "reference": {
+              "C": 137100,
+              "N": 34620,
+              "O": 42180,
+              "S": 540
+            },
+            "target": {
+              "C": 17142.467491965508,
+              "N": 4328.754373244682,
+              "O": 5274.028291838841,
+              "S": 67.51956561386852
+            }
+          },
+          "density": {
+            "plateau_total": 0.03357323546123534,
+            "plateau_by_element": {
+              "C": 0.02146470146304498,
+              "N": 0.005420189384760155,
+              "O": 0.0066038009315188715,
+              "S": 8.45436819113369e-05
+            },
+            "reference_mean_geometric": 0.02191390743058441,
+            "reference_max_bin": 0.04303568762438014,
+            "ratio_to_mean": 1.532051532461,
+            "ratio_to_max_bin": 0.7801254566736787
+          },
+          "sensitivity": {
+            "hard": {
+              "inner": 98.45703204305013,
+              "outer": 135.51068300449083,
+              "thickness": 37.053650961440695
+            },
+            "mass": {
+              "inner": 98.59186653825553,
+              "outer": 135.48568132858756,
+              "thickness": 36.89381479033203
+            },
+            "depth": {
+              "inner": 98.9593821991022,
+              "outer": 135.14844084231987,
+              "thickness": 36.189058643217685
+            }
+          },
+          "per_element_bounds": {
+            "C": {
+              "inner": 98.69219231411513,
+              "outer": 135.01730696457727,
+              "thickness": 36.32511465046214
+            },
+            "N": {
+              "inner": 97.33660839441436,
+              "outer": 135.21825818981142,
+              "thickness": 37.88164979539707
+            },
+            "O": {
+              "inner": 99.27086892174553,
+              "outer": 136.6531456481387,
+              "thickness": 37.38227672639316
+            },
+            "S": {
+              "inner": 105.00050056598843,
+              "outer": 137.04135201037093,
+              "thickness": 32.0408514443825
+            }
+          },
+          "skewness": {
+            "reference": 0.10093150906384213,
+            "step": -0.21263756736763992,
+            "difference": -0.313569076431482
+          }
+        },
+        "status": "valid",
+        "pdb_sha256": "41db1ed3c029bdb7c028f50783bdedb7551eb532a4556c7cd7359041ff900007",
+        "atom_count": 26814,
+        "element_counts": {
+          "C": 17143,
+          "N": 4329,
+          "O": 5274,
+          "S": 68
+        },
+        "errors": {
+          "C": 0.027380214721257422,
+          "N": 0.05351665635766007,
+          "O": 0.05613612179819633,
+          "S": 0.03446614837848123
+        },
+        "total_profile_error": 0.03727386410631826,
+        "multiples_counting": {
+          "C": 2.06513377932468,
+          "N": 2.032685973267614,
+          "O": 2.506065291643367,
+          "S": 0.15661682974688187,
+          "Total": 2.107379446103776
+        },
+        "tolerances_used": {
+          "profile": {
+            "C": 0.0382,
+            "N": 0.0808,
+            "O": 0.067,
+            "S": 0.656
+          },
+          "composition": 0.0,
+          "calibration_sha256": "78f1f11099651a9a95a284587fb79d46f34612ec6ebfc74d5bbe70916a2ba77c"
+        },
+        "search": {
+          "termination": "constraints_satisfied",
+          "first_feasible_iteration": 49,
+          "iterations": 49,
+          "candidate_iteration": 49,
+          "profile_updates": 0,
+          "elapsed_seconds": 10.727205089000563,
+          "errors_at_push": {
+            "0": {
+              "iteration": 49,
+              "total_profile_error": 0.03727386410631826,
+              "element_errors": {
+                "C": 0.027380214721257422,
+                "N": 0.05351665635766007,
+                "O": 0.05613612179819633,
+                "S": 0.03446614837848123
+              },
+              "push_count": 0
+            }
+          },
+          "mean_acceptance_fraction": null,
+          "committed_pushes": 0
+        },
+        "timings_seconds": {
+          "reference": 9.355299880553503e-05,
+          "analysis": 3.9638930699984485,
+          "inventory": 0.43715090400110057,
+          "initialization": 0.11421448799956124,
+          "search": 10.727205089000563,
+          "export_validation": 2.6107194510004774,
+          "preparation": 4.920803111997884
+        },
+        "elapsed_seconds": 18.25896300199929,
+        "runtime": {
+          "python": "3.12.14",
+          "numpy": "2.3.5",
+          "scipy": "1.17.0"
+        },
+        "peak_rss_mib": 344.4453125,
+        "connectivity_audit": {
+          "atom_count": 26814,
+          "edge_count": 97116,
+          "isolated_atoms": 0,
+          "isolated_atom_examples": [],
+          "global_components": 1,
+          "largest_component_sizes": [
+            26814
+          ],
+          "small_component_atoms": [],
+          "component_representatives": [
+            {
+              "index": 0,
+              "serial": 1,
+              "atom_name": "N",
+              "residue_name": "LYS",
+              "residue_number": "1",
+              "residue_index": 0,
+              "chain": "A",
+              "segment": 0,
+              "element": "N"
+            }
+          ],
+          "disconnected_residues": 0,
+          "disconnected_residue_examples": [],
+          "passed": true
+        },
+        "pair_distance_audit": {
+          "pairs": {
+            "C-C": {
+              "minimum_distance_angstrom": 1.3552055194692816,
+              "closest_atoms": [
+                {
+                  "index": 7222,
+                  "serial": 7223,
+                  "atom_name": "CG2",
+                  "residue_name": "THR",
+                  "residue_number": "1023",
+                  "residue_index": 1022,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "C"
+                },
+                {
+                  "index": 26363,
+                  "serial": 26364,
+                  "atom_name": "CE1",
+                  "residue_name": "HIS",
+                  "residue_number": "3541",
+                  "residue_index": 3540,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "C"
+                }
+              ],
+              "limit_angstrom": 1.353125640877449,
+              "covalent_floor_angstrom": 1.35,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "C-N": {
+              "minimum_distance_angstrom": 1.3181278390201772,
+              "closest_atoms": [
+                {
+                  "index": 6881,
+                  "serial": 6882,
+                  "atom_name": "CA",
+                  "residue_name": "THR",
+                  "residue_number": "975",
+                  "residue_index": 974,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "C"
+                },
+                {
+                  "index": 6404,
+                  "serial": 6405,
+                  "atom_name": "N",
+                  "residue_name": "TRP",
+                  "residue_number": "915",
+                  "residue_index": 914,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "N"
+                }
+              ],
+              "limit_angstrom": 1.3161189155999518,
+              "covalent_floor_angstrom": 1.314,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "C-O": {
+              "minimum_distance_angstrom": 1.2440522497065782,
+              "closest_atoms": [
+                {
+                  "index": 25405,
+                  "serial": 25406,
+                  "atom_name": "CB",
+                  "residue_name": "ASP",
+                  "residue_number": "3429",
+                  "residue_index": 3428,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "C"
+                },
+                {
+                  "index": 5357,
+                  "serial": 5358,
+                  "atom_name": "O",
+                  "residue_name": "ILE",
+                  "residue_number": "828",
+                  "residue_index": 827,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "O"
+                }
+              ],
+              "limit_angstrom": 1.2196351913584664,
+              "covalent_floor_angstrom": 1.242,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "C-S": {
+              "minimum_distance_angstrom": 2.71084488674657,
+              "closest_atoms": [
+                {
+                  "index": 448,
+                  "serial": 449,
+                  "atom_name": "CE",
+                  "residue_name": "LYS",
+                  "residue_number": "50",
+                  "residue_index": 49,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "C"
+                },
+                {
+                  "index": 25943,
+                  "serial": 25944,
+                  "atom_name": "SD",
+                  "residue_name": "MET",
+                  "residue_number": "3496",
+                  "residue_index": 3495,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "S"
+                }
+              ],
+              "limit_angstrom": 2.708783490794347,
+              "covalent_floor_angstrom": 1.602,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "N-N": {
+              "minimum_distance_angstrom": 2.145653047442665,
+              "closest_atoms": [
+                {
+                  "index": 8028,
+                  "serial": 8029,
+                  "atom_name": "N",
+                  "residue_name": "THR",
+                  "residue_number": "1139",
+                  "residue_index": 1138,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "N"
+                },
+                {
+                  "index": 10893,
+                  "serial": 10894,
+                  "atom_name": "N",
+                  "residue_name": "SER",
+                  "residue_number": "1565",
+                  "residue_index": 1564,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "N"
+                }
+              ],
+              "limit_angstrom": 2.143693308288291,
+              "covalent_floor_angstrom": 1.278,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "N-O": {
+              "minimum_distance_angstrom": 2.2217079015928265,
+              "closest_atoms": [
+                {
+                  "index": 4188,
+                  "serial": 4189,
+                  "atom_name": "N",
+                  "residue_name": "ALA",
+                  "residue_number": "677",
+                  "residue_index": 676,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "N"
+                },
+                {
+                  "index": 5181,
+                  "serial": 5182,
+                  "atom_name": "O",
+                  "residue_name": "ILE",
+                  "residue_number": "806",
+                  "residue_index": 805,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "O"
+                }
+              ],
+              "limit_angstrom": 2.2195013020768433,
+              "covalent_floor_angstrom": 1.206,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "N-S": {
+              "minimum_distance_angstrom": 3.082344724394079,
+              "closest_atoms": [
+                {
+                  "index": 971,
+                  "serial": 972,
+                  "atom_name": "NZ",
+                  "residue_name": "LYS",
+                  "residue_number": "108",
+                  "residue_index": 107,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "N"
+                },
+                {
+                  "index": 15734,
+                  "serial": 15735,
+                  "atom_name": "SG",
+                  "residue_name": "CYS",
+                  "residue_number": "2301",
+                  "residue_index": 2300,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "S"
+                }
+              ],
+              "limit_angstrom": 3.0799550321392744,
+              "covalent_floor_angstrom": 1.566,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "O-O": {
+              "minimum_distance_angstrom": 2.1701246507977325,
+              "closest_atoms": [
+                {
+                  "index": 3996,
+                  "serial": 3997,
+                  "atom_name": "O",
+                  "residue_name": "ALA",
+                  "residue_number": "638",
+                  "residue_index": 637,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "O"
+                },
+                {
+                  "index": 24880,
+                  "serial": 24881,
+                  "atom_name": "OD2",
+                  "residue_name": "ASP",
+                  "residue_number": "3363",
+                  "residue_index": 3362,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "O"
+                }
+              ],
+              "limit_angstrom": 2.1679404973384337,
+              "covalent_floor_angstrom": 1.1340000000000001,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "O-S": {
+              "minimum_distance_angstrom": 3.4693564244683777,
+              "closest_atoms": [
+                {
+                  "index": 18353,
+                  "serial": 18354,
+                  "atom_name": "O",
+                  "residue_name": "LEU",
+                  "residue_number": "2604",
+                  "residue_index": 2603,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "O"
+                },
+                {
+                  "index": 15740,
+                  "serial": 15741,
+                  "atom_name": "SG",
+                  "residue_name": "CYS",
+                  "residue_number": "2302",
+                  "residue_index": 2301,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "S"
+                }
+              ],
+              "limit_angstrom": 3.4671638265302653,
+              "covalent_floor_angstrom": 1.4940000000000002,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            },
+            "S-S": {
+              "minimum_distance_angstrom": 3.5055423260887872,
+              "closest_atoms": [
+                {
+                  "index": 15626,
+                  "serial": 15627,
+                  "atom_name": "SG",
+                  "residue_name": "CYS",
+                  "residue_number": "2283",
+                  "residue_index": 2282,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "S"
+                },
+                {
+                  "index": 25999,
+                  "serial": 26000,
+                  "atom_name": "SD",
+                  "residue_name": "MET",
+                  "residue_number": "3503",
+                  "residue_index": 3502,
+                  "chain": "A",
+                  "segment": 0,
+                  "element": "S"
+                }
+              ],
+              "limit_angstrom": 3.0,
+              "covalent_floor_angstrom": 1.854,
+              "below_limit_count": 0,
+              "below_covalent_floor_count": 0,
+              "below_limit_examples": [],
+              "below_covalent_floor_examples": []
+            }
+          },
+          "below_limit_count": 0,
+          "below_covalent_floor_count": 0,
+          "passed": true
+        },
+        "validation": {
+          "status": "valid",
+          "mandatory_pass": true,
+          "connectivity_audit": {
+            "atom_count": 26814,
+            "edge_count": 97116,
+            "isolated_atoms": 0,
+            "isolated_atom_examples": [],
+            "global_components": 1,
+            "largest_component_sizes": [
+              26814
+            ],
+            "small_component_atoms": [],
+            "component_representatives": [
+              {
+                "index": 0,
+                "serial": 1,
+                "atom_name": "N",
+                "residue_name": "LYS",
+                "residue_number": "1",
+                "residue_index": 0,
+                "chain": "A",
+                "segment": 0,
+                "element": "N"
+              }
+            ],
+            "disconnected_residues": 0,
+            "disconnected_residue_examples": [],
+            "passed": true
+          },
+          "pair_distance_audit": {
+            "pairs": {
+              "C-C": {
+                "minimum_distance_angstrom": 1.3552055194692816,
+                "closest_atoms": [
+                  {
+                    "index": 7222,
+                    "serial": 7223,
+                    "atom_name": "CG2",
+                    "residue_name": "THR",
+                    "residue_number": "1023",
+                    "residue_index": 1022,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "C"
+                  },
+                  {
+                    "index": 26363,
+                    "serial": 26364,
+                    "atom_name": "CE1",
+                    "residue_name": "HIS",
+                    "residue_number": "3541",
+                    "residue_index": 3540,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "C"
+                  }
+                ],
+                "limit_angstrom": 1.353125640877449,
+                "covalent_floor_angstrom": 1.35,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "C-N": {
+                "minimum_distance_angstrom": 1.3181278390201772,
+                "closest_atoms": [
+                  {
+                    "index": 6881,
+                    "serial": 6882,
+                    "atom_name": "CA",
+                    "residue_name": "THR",
+                    "residue_number": "975",
+                    "residue_index": 974,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "C"
+                  },
+                  {
+                    "index": 6404,
+                    "serial": 6405,
+                    "atom_name": "N",
+                    "residue_name": "TRP",
+                    "residue_number": "915",
+                    "residue_index": 914,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "N"
+                  }
+                ],
+                "limit_angstrom": 1.3161189155999518,
+                "covalent_floor_angstrom": 1.314,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "C-O": {
+                "minimum_distance_angstrom": 1.2440522497065782,
+                "closest_atoms": [
+                  {
+                    "index": 25405,
+                    "serial": 25406,
+                    "atom_name": "CB",
+                    "residue_name": "ASP",
+                    "residue_number": "3429",
+                    "residue_index": 3428,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "C"
+                  },
+                  {
+                    "index": 5357,
+                    "serial": 5358,
+                    "atom_name": "O",
+                    "residue_name": "ILE",
+                    "residue_number": "828",
+                    "residue_index": 827,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "O"
+                  }
+                ],
+                "limit_angstrom": 1.2196351913584664,
+                "covalent_floor_angstrom": 1.242,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "C-S": {
+                "minimum_distance_angstrom": 2.71084488674657,
+                "closest_atoms": [
+                  {
+                    "index": 448,
+                    "serial": 449,
+                    "atom_name": "CE",
+                    "residue_name": "LYS",
+                    "residue_number": "50",
+                    "residue_index": 49,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "C"
+                  },
+                  {
+                    "index": 25943,
+                    "serial": 25944,
+                    "atom_name": "SD",
+                    "residue_name": "MET",
+                    "residue_number": "3496",
+                    "residue_index": 3495,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "S"
+                  }
+                ],
+                "limit_angstrom": 2.708783490794347,
+                "covalent_floor_angstrom": 1.602,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "N-N": {
+                "minimum_distance_angstrom": 2.145653047442665,
+                "closest_atoms": [
+                  {
+                    "index": 8028,
+                    "serial": 8029,
+                    "atom_name": "N",
+                    "residue_name": "THR",
+                    "residue_number": "1139",
+                    "residue_index": 1138,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "N"
+                  },
+                  {
+                    "index": 10893,
+                    "serial": 10894,
+                    "atom_name": "N",
+                    "residue_name": "SER",
+                    "residue_number": "1565",
+                    "residue_index": 1564,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "N"
+                  }
+                ],
+                "limit_angstrom": 2.143693308288291,
+                "covalent_floor_angstrom": 1.278,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "N-O": {
+                "minimum_distance_angstrom": 2.2217079015928265,
+                "closest_atoms": [
+                  {
+                    "index": 4188,
+                    "serial": 4189,
+                    "atom_name": "N",
+                    "residue_name": "ALA",
+                    "residue_number": "677",
+                    "residue_index": 676,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "N"
+                  },
+                  {
+                    "index": 5181,
+                    "serial": 5182,
+                    "atom_name": "O",
+                    "residue_name": "ILE",
+                    "residue_number": "806",
+                    "residue_index": 805,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "O"
+                  }
+                ],
+                "limit_angstrom": 2.2195013020768433,
+                "covalent_floor_angstrom": 1.206,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "N-S": {
+                "minimum_distance_angstrom": 3.082344724394079,
+                "closest_atoms": [
+                  {
+                    "index": 971,
+                    "serial": 972,
+                    "atom_name": "NZ",
+                    "residue_name": "LYS",
+                    "residue_number": "108",
+                    "residue_index": 107,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "N"
+                  },
+                  {
+                    "index": 15734,
+                    "serial": 15735,
+                    "atom_name": "SG",
+                    "residue_name": "CYS",
+                    "residue_number": "2301",
+                    "residue_index": 2300,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "S"
+                  }
+                ],
+                "limit_angstrom": 3.0799550321392744,
+                "covalent_floor_angstrom": 1.566,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "O-O": {
+                "minimum_distance_angstrom": 2.1701246507977325,
+                "closest_atoms": [
+                  {
+                    "index": 3996,
+                    "serial": 3997,
+                    "atom_name": "O",
+                    "residue_name": "ALA",
+                    "residue_number": "638",
+                    "residue_index": 637,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "O"
+                  },
+                  {
+                    "index": 24880,
+                    "serial": 24881,
+                    "atom_name": "OD2",
+                    "residue_name": "ASP",
+                    "residue_number": "3363",
+                    "residue_index": 3362,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "O"
+                  }
+                ],
+                "limit_angstrom": 2.1679404973384337,
+                "covalent_floor_angstrom": 1.1340000000000001,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "O-S": {
+                "minimum_distance_angstrom": 3.4693564244683777,
+                "closest_atoms": [
+                  {
+                    "index": 18353,
+                    "serial": 18354,
+                    "atom_name": "O",
+                    "residue_name": "LEU",
+                    "residue_number": "2604",
+                    "residue_index": 2603,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "O"
+                  },
+                  {
+                    "index": 15740,
+                    "serial": 15741,
+                    "atom_name": "SG",
+                    "residue_name": "CYS",
+                    "residue_number": "2302",
+                    "residue_index": 2301,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "S"
+                  }
+                ],
+                "limit_angstrom": 3.4671638265302653,
+                "covalent_floor_angstrom": 1.4940000000000002,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              },
+              "S-S": {
+                "minimum_distance_angstrom": 3.5055423260887872,
+                "closest_atoms": [
+                  {
+                    "index": 15626,
+                    "serial": 15627,
+                    "atom_name": "SG",
+                    "residue_name": "CYS",
+                    "residue_number": "2283",
+                    "residue_index": 2282,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "S"
+                  },
+                  {
+                    "index": 25999,
+                    "serial": 26000,
+                    "atom_name": "SD",
+                    "residue_name": "MET",
+                    "residue_number": "3503",
+                    "residue_index": 3502,
+                    "chain": "A",
+                    "segment": 0,
+                    "element": "S"
+                  }
+                ],
+                "limit_angstrom": 3.0,
+                "covalent_floor_angstrom": 1.854,
+                "below_limit_count": 0,
+                "below_covalent_floor_count": 0,
+                "below_limit_examples": [],
+                "below_covalent_floor_examples": []
+              }
+            },
+            "below_limit_count": 0,
+            "below_covalent_floor_count": 0,
+            "passed": true
+          },
+          "metrics_match": true
+        }
+      }
+    ],
+    "notes": [
+      "Actual seeded executions on complete protein 1CWP. Time limit 1800 s, max iterations 2000, 50 maximum pushes; no benchmark reached those hard limits.",
+      "Normal acceptance stopping retained: full-size valid after 10 pushes; half-bound valid at first feasible geometry with 0 pushes. These are not equal-push comparisons.",
+      "Counting multiples use floor means; acceptance uses rounded-up 2 x counting p95, so a mean multiple above 2 can pass.",
+      "Half-bound resizing retains 4 A edge ramps and plateau densities, so volume/count scaling is not exactly one eighth.",
+      "Fit and initial full-size calibration were first exercised before the development version was bumped; final fit and assessment reports are from 0.1.11. Final assessment tolerances equal the generation inputs.",
+      "Prior reference-model particle13 errors C=0.0188,N=0.1081,O=0.0789 are contextual only: they measure a different target, not a head-to-head profile-quality comparison.",
+      "Large PDB/JSON/CSV/PNG artifacts and logs are local under .cache/revision06; this file stores compact scalar evidence and replay settings.",
+      "Observed wall times include concurrent auxiliary runs/tests; these are packing pilots, not isolated speed benchmarks."
+    ]
   }
 }

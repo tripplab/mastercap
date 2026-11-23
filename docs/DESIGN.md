@@ -5,9 +5,12 @@ thresholds remain provisional until calibrated on expanded CCMV 1CWP.
 
 | Module | Responsibility |
 |---|---|
-| `model.py` | Records, internal identities, protein recognition, fixed vdW table. |
+| `model.py` | Records, internal identities, protein recognition, fixed vdW/covalent/mass tables. |
 | `pdbio.py` | PDB/gzip/models, filtering, VIPERdb cache, TER writer. |
-| `analysis.py` | Center, bounds, volume-aware profiles, smoothing, pair statistics. |
+| `analysis.py` | Center, bounds, profiles, smoothing, pair statistics and shared target dispatcher. |
+| `radial.py` | Array-only shell volumes and radial bin convention. |
+| `step.py` | Analytic ramp integrals and moment-matched homogeneous targets. |
+| `calibration.py` | Profile baselines, settings compatibility and tolerance suggestions. |
 | `constraints.py` | Spatial checks, internal/global graphs, acceptance metrics. |
 | `generate.py` | Integer inventory, initialization, bounded repair, rigid projection. |
 | `refinement.py` | Candidate ranking, slack targets, checked partial pushes, acceptance and rollback controllers. |
@@ -325,3 +328,60 @@ C/O mean mode effects are below within-mode seed spread; N profile improvement
 is ~1.4 pooled seed SD, with one paired reversal. The n=3 analysis is descriptive,
 not a significance claim. Full results and raw/capped gaps live in the benchmark
 JSON's calibration section. No second experimental full capsid was supplied.
+
+
+## Revision 06: homogeneous step control arm
+
+The reference model remains unchanged by default. `build_target` dispatches all
+four CLI workflows to the same `Target`: edges, densities, an optional reference
+on those edges, and a step report. Plain-array `fit_step` remains independent of
+CLI/Analysis objects and can later fit weighted samples of other radial targets.
+
+A step with half-height radii a,b and ramp width w has unit height h(r): it rises
+linearly from 0 to 1 over [a-w/2,a+w/2], stays 1 through b-w/2, then falls to 0
+at b+w/2. Hard steps use w=0. Nonoverlap and nonnegative support require
+b-a>=w and a-w/2>=0. All target integrals are closed-form polynomials:
+I_k = integral h(r) r^(2+k) dr, k=0..3. A midpoint polynomial expansion avoids
+cancellation when integrating thin ramp fragments at large radii. No numerical
+quadrature is used outside tests.
+
+Count-weighted atom moments m1=<r>,m2=<r^2> determine a,b from I1/I0=m1 and
+I2/I0=m2. Least squares uses relative residuals and nonnegative support-inner
+radius/plateau-length parameters. Both residuals must be <1e-10 and the solution
+must lie strictly inside parameter bounds. Atom weighting represents material
+per spherical volume, whereas per-area and mass fits answer different questions;
+they are sensitivity diagnostics only. Shared bounds give rho_e=N_e/(4*pi*I0),
+so elemental composition is homogeneous in every bin. Analytical clipped shell
+integrals conserve counts independently of ramp/bin alignment.
+
+Fit once to selected reference atoms (after percentile trimming), then resize
+with user half-height bounds, keeping w and rho_e fixed. Target counts scale by
+I0_new/I0_fit; the existing integer inventory handles nonintegral desired counts.
+Atom support is [a-w/2,b+w/2], used by geometry and profile checks. Diagnostic
+hard, mass, per-area and per-element fits never override the count-weighted fit.
+Skewness records the outer-tail information lost by the symmetric-wall control.
+
+Reference comparison profiles must be re-binned on step edges at fitted size;
+atoms outside support are reported. A resized step has no mapped reference curve.
+Every caller, including search metrics and CSV/PNG, handles that absence. Step
+plots draw their target even though Gaussian smoothing is disabled. Validation
+reconstructs the target from saved settings, checks generated bounds/support to
+1e-9 A, counts to relative 1e-9 and edges to 1e-9 A, before publishing a report.
+Sulfur reference-radius placement is forbidden by both CLI and search API.
+
+Calibration self-error measures reference-versus-step mismatch. Only counting
+is a floor: orientation/placement would measure an intentionally removed model,
+so they are explicitly skipped. Resized counting draws use rounded target counts,
+not the original particle inventory. Orientation multiples and gap closure are
+null with reasons. Suggestions use counting and exclude experimental variation,
+which is reported separately. CSV/PNG omit skipped levels; step plots label the
+reference mismatch. Model/edge width join settings checks, with missing keys
+interpreted as the legacy reference model. The stricter counting-based quality
+rule can yield approximate particles, while geometry remains a hard constraint.
+
+Limitations: crystallographic disorder truncates the visible inner protein
+(1CWP N-terminal arms), so both layered/reference and step controls omit that
+material. The fitted b lies inside the geometric reference outer radius; FEM
+indentation contact should use b and explicitly distinguish its ramp support.
+No skin-core thickness rule, Gaussian smoothing change, or JSON size redesign
+is included in this revision.
