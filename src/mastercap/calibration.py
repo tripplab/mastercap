@@ -52,9 +52,11 @@ def rotated_coordinates(codes,centroids,offsets,rotations):
     return centroids[codes]+np.einsum('nij,nj->ni',rotations[codes],offsets)
 
 
-def resampling_levels(analysis,edges,target,replicates=50,seed=42,progress=None):
+def resampling_levels(analysis,edges,target,replicates=50,seed=42,progress=None,model="reference"):
     if not isinstance(replicates,int) or replicates<1 or seed<0:
         raise MastercapError('Replicates must be a positive integer and seed nonnegative')
+    if model not in ('reference','step'):
+        raise MastercapError('Profile model must be reference or step')
     rng=np.random.default_rng(seed)
     structure=analysis.structure
     elements=structure.elements
@@ -68,10 +70,13 @@ def resampling_levels(analysis,edges,target,replicates=50,seed=42,progress=None)
     probabilities={e:p*volume/np.sum(p*volume) for e,p in target.items()}
     counting=[]
     for _ in range(replicates):
-        counts={e:rng.multinomial(len(indices[e]),probabilities[e]) for e in target}
+        counts={e:rng.multinomial(int(round(np.sum(target[e]*volume))) if model=="step" else len(indices[e]), probabilities[e]) for e in target}
         counting.append(errors_from_counts(counts,edges,target))
     levels['counting']=summarize(counting)
     if progress:progress('counting',levels['counting'])
+    if model == 'step':
+        levels.update({name: {'skipped': 'not defined for step targets'} for name in ('orientation','placement')})
+        return levels
     codes,centroids,offsets=residue_frame(structure)
     for level in ('orientation','placement'):
         samples=[]
@@ -87,18 +92,22 @@ def resampling_levels(analysis,edges,target,replicates=50,seed=42,progress=None)
     return levels
 
 
-def profile_settings(analysis,edges,bin_width,radius_method='extrema',percentiles=(.5,99.5)):
+def profile_settings(analysis,edges,bin_width,radius_method='extrema',percentiles=(.5,99.5), *, model='reference', step_edge_width=None):
     return {'reference_hash':analysis.structure.provenance['sha256'],
             'reference_filename':Path(analysis.structure.provenance['path']).name,
             'model':analysis.structure.provenance['model'],'bin_width':float(bin_width),
             'smoothing_sigma':analysis.smoothing_sigma,'inner_radius':float(edges[0]),'outer_radius':float(edges[-1]),
-            'edges_count':len(edges),'radius_method':radius_method,'radius_percentiles':list(percentiles)}
+            'edges_count':len(edges),'radius_method':radius_method,'radius_percentiles':list(percentiles),
+            'profile_model':model,'step_edge_width':step_edge_width if model=='step' else None}
 
 
 def check_settings(saved,current):
     labels={'reference_hash':'reference hash','model':'model','bin_width':'bin width','smoothing_sigma':'smoothing sigma',
             'inner_radius':'inner radius','outer_radius':'outer radius','radius_method':'radius method',
-            'radius_percentiles':'radius percentiles','edges_count':'edges count'}
+            'radius_percentiles':'radius percentiles','edges_count':'edges count',
+            'profile_model':'profile model','step_edge_width':'step edge width'}
+    saved={'profile_model':'reference','step_edge_width':None,**saved}
+    current={'profile_model':'reference','step_edge_width':None,**current}
     differences=[]
     for key,label in labels.items():
         if key not in saved:
@@ -117,7 +126,9 @@ def settings_from_generation(saved):
             'bin_width':options['width'],'smoothing_sigma':options['sigma'],
             'inner_radius':saved['target']['edges'][0],'outer_radius':saved['target']['edges'][-1],
             'edges_count':len(saved['target']['edges']),'radius_method':options['radius_method'],
-            'radius_percentiles':options['percentiles']}
+            'radius_percentiles':options['percentiles'],
+            'profile_model':'step' if options.get('step_profile',False) else 'reference',
+            'step_edge_width':options.get('step_edge_width',4.0) if options.get('step_profile',False) else None}
 
 
 def load_tolerances(path,current,elements,warning=None):
@@ -199,10 +210,15 @@ def generated_assessment(path,analysis,edges,target,settings,levels):
             raise MastercapError(f'Invalid sibling generation report {sibling}: {exc}') from exc
     counts=_counts(particle,center,edges,target)
     errors=errors_from_counts(counts,edges,target)
-    multiples={level:{e:(error/levels[level][e]['mean'] if levels[level][e]['mean']>0 else None)
+    step = settings.get('profile_model','reference') == 'step'
+    multiples={level:{e:(error/levels[level][e]['mean'] if 'skipped' not in levels[level] and levels[level][e]['mean']>0 else None)
                       for e,error in errors.items()} for level in ('counting','orientation')}
     gap={};reasons={}
     for e,error in errors.items():
+        if step:
+            gap[e]=None
+            reasons[e]='step target: no orientation/placement levels'
+            continue
         placement,orientation=levels['placement'][e]['mean'],levels['orientation'][e]['mean']
         gap[e]=(placement-error)/(placement-orientation) if placement>orientation else None
         if gap[e] is None:reasons[e]='placement mean is not above orientation mean'
@@ -210,9 +226,9 @@ def generated_assessment(path,analysis,edges,target,settings,levels):
             'sibling_report':str(sibling) if sibling.exists() else None,'center':center.tolist(),
             'element_counts':{e:int(np.count_nonzero(particle.elements==e)) for e in target},
             'warnings':particle.warnings,'multiples_counting':multiples['counting'],
-            'multiples_orientation':multiples['orientation'],'gap_closed':gap,
-            'gap_closed_clipped':{e:min(1,v) if v is not None else None for e,v in gap.items()},
-            'undefined_gap_reasons':reasons,'zero_floor_means':[level+':'+e for level in multiples for e,v in multiples[level].items() if v is None]}
+            'multiples_orientation':None if step else multiples['orientation'],'gap_closed':None if step else gap,
+            'gap_closed_clipped':None if step else {e:min(1,v) if v is not None else None for e,v in gap.items()},
+            'undefined_gap_reasons':reasons,'zero_floor_means':[level+':'+e for level in multiples for e,v in multiples[level].items() if v is None and not (step and level=='orientation')]}
 
 
 def round_up_three(value):
@@ -223,25 +239,28 @@ def round_up_three(value):
     return float(rounded),format(rounded,'.3g')
 
 
-def suggest(levels,compares,multiple=2.0,basis='orientation',statistic='p95'):
+def suggest(levels,compares,multiple=2.0,basis='orientation',statistic='p95', *, model='reference'):
     if not np.isfinite(multiple) or multiple<=0 or basis not in ('orientation','counting') or statistic not in ('p95','mean'):
         raise MastercapError('Invalid calibration floor suggestion settings')
+    if model=='step' and basis!='counting':
+        raise MastercapError('orientation floors are not defined for step targets; use --floor-basis counting')
     tolerances={};rules={};formatted={}
     for e,stats in levels[basis].items():
         if e=='Total':continue
         floor=multiple*stats[statistic]
-        variation=max((row['shape'][e] for row in compares),default=0.0)
+        variation=max((row['shape'][e] for row in compares),default=0.0) if model!='step' else 0.0
         value=max(floor,variation)
         tolerances[e],formatted[e]=round_up_three(value)
         rules[e]='real variation' if variation>floor else 'floor'
     line='--profile-tolerance '+','.join(f'{e}={formatted[e]}' for e in sorted(formatted))+' --composition-tolerance 0'
     return {'profile_tolerance':tolerances,'composition_tolerance':0,'basis':basis,'statistic':statistic,
-            'floor_multiple':multiple,'rule_by_element':rules,'paste_line':line}
+            'floor_multiple':multiple,'rule_by_element':rules,'paste_line':line,'compare_used':bool(compares) and model!='step'}
 
 
 def calibrate(analysis,edges,target,settings,replicates=50,seed=42,compares=(),generated=(),
               floor_multiple=2.0,floor_basis='orientation',floor_statistic='p95',progress=None):
-    levels=resampling_levels(analysis,edges,target,replicates,seed,progress)
+    model=settings.get('profile_model','reference')
+    levels=resampling_levels(analysis,edges,target,replicates,seed,progress,model=model)
     comparisons=[]
     for path in compares:
         structure=read_pdb(path,model=settings['model'])
@@ -252,4 +271,4 @@ def calibrate(analysis,edges,target,settings,replicates=50,seed=42,compares=(),g
             'element_counts':{e:int(np.count_nonzero(analysis.structure.elements==e)) for e in target},
             'target_counts':{e:float(np.sum(p*shell_volumes(edges))) for e,p in target.items()},
             'levels':levels,'compare':comparisons,'generated':assessed,'chain_type_spread':chain_spread(analysis,edges,target),
-            'suggested':suggest(levels,comparisons,floor_multiple,floor_basis,floor_statistic)}
+            'suggested':suggest(levels,comparisons,floor_multiple,floor_basis,floor_statistic,model=model)}

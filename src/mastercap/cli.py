@@ -15,7 +15,7 @@ import numpy as np
 import scipy
 
 from . import __version__
-from .analysis import (analyze, target_profiles, distance_statistics, parse_limit_override,
+from .analysis import (analyze, build_target, distance_statistics, parse_limit_override,
                        resolve_limit_overrides)
 from .constraints import (acceptance, profile_metrics, validate_geometry,
                           connectivity_audit, require_connectivity_audit,
@@ -91,7 +91,7 @@ def configure_tolerances(args,analysis,edges,settings=None,saved=None):
         args.tolerance_source='explicit_with_saved_defaults' if saved is not None and explicit else 'saved' if saved is not None else 'explicit'
 
     if args.tolerance_source == 'calibration':
-        LOG.info('Loaded calibration tolerances: %s (SHA-256 %s); reference/model/bin/smoothing/radii settings matched',
+        LOG.info('Loaded calibration tolerances: %s (SHA-256 %s); reference/model/profile model/bin/smoothing/radii/step edge width settings matched',
                  args.calibration_file, args.calibration_sha256)
     elif args.tolerance_source == 'saved':
         LOG.info('Using tolerances saved in generation report: %s; original calibration file is not reread', args.report)
@@ -142,6 +142,9 @@ class DetailedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.Raw
         "composition_tolerance": "unset (uncalibrated)",
         "refine_iterations": "no additional iteration cap",
         "pair_limit_override": "S-S=steric",
+        "smoothing_sigma": "1.0 (0 with --step-profile)",
+        "step_edge_width": "4.0 with --step-profile",
+        "floor_basis": "orientation (counting with --step-profile)",
     }
 
     def _get_help_string(self, action):
@@ -199,7 +202,8 @@ Workflow and defaults:
   Automatically ANALYZE -> GENERATE -> WRITE/REREAD PDB -> VALIDATE.
   By default, keep reference radii and center, use independent atoms and random
   initialization, and smooth radial profiles with the provisional 1 A sigma.
-  Radii bound atom centers, not the outer surfaces of their vdW spheres.
+  Reference-model radii bound atom centers, not vdW surfaces. In step mode the
+  CLI radii are half-height bounds; support extends half the ramp width beyond them.
   The 300 s repair budget excludes preparation; authorized fallback shares the
   remaining repair time. Individual repair operations can overrun the deadline.
   Progress is printed every 5 iterations and at termination; --progress-interval
@@ -309,17 +313,42 @@ Reading the calibration PNG:
   Hollow diamonds show --compare shape errors; filled triangles show --generated
   errors. Without those options the corresponding rows have no sample markers.
   The dashed line is the suggested per-element tolerance (default 2 * orientation
-  p95); an element's triangle at or left of it passes that profile threshold.
+  p95, or counting p95 with --step-profile); an element's triangle at or left of
+  it passes that profile threshold.
   Total is diagnostic and has no tolerance. Zero errors use a labelled display
   position because log(0) is undefined. No particle is assessed unless supplied
   with --generated; rerun calibrate with that option after generation."""
+
+STEP_HELP = """
+STEP PROFILE:
+  --step-profile is a homogeneous control arm: shared half-height bounds fitted
+  to reference atom moments <r> and <r^2>, preserving N and composition at fitted
+  size. It removes layering and outer-tail character (see skewness diagnostics).
+  Fixed linear edge ramps have width --step-edge-width (default 4 A; 0 is hard).
+  Atom support extends width/2 beyond each half-height bound. Resizing with
+  --inner-radius/--outer-radius keeps plateau densities; counts scale with step
+  volume. Missing bounds use the fit. Smoothing and sulfur placement reference
+  are incompatible; sulfur placement profile follows the homogeneous S target.
+  Step calibration uses counting only; orientation/placement floors are undefined.
+  Experimental --compare samples are reported but do not enlarge suggestions.
+  Counting x2 thresholds are stricter than orientation thresholds: approximate
+  particles are expected and need --allow-approximate; geometry stays mandatory.
+"""
+for _command, _example in {
+    'analyze': 'mastercap analyze --input ./1cwp_full.vdb --bin-width 4 --step-profile --output-prefix results/step_fit --csv --plot',
+    'calibrate': 'mastercap calibrate --input ./1cwp_full.vdb --bin-width 4 --step-profile --replicates 50 --seed 42 --floor-multiple 2 --output-prefix results/calib_step --csv --plot',
+    'generate': 'mastercap generate --input ./1cwp_full.vdb --bin-width 4 --step-profile --mode independent --distribution regular --tolerances-from results/calib_step_calibration.json --allow-approximate --output-prefix results/step01 --csv --plot',
+}.items():
+    COMMAND_EXAMPLES[_command] += '\nStep example:\n  '+_example+'\n'
+
 
 SMOOTHING_HELP = """
 Smoothing and radial resolution:
   --smoothing-sigma is Gaussian width in A, not a number of bins. Higher sigma
   smooths more, broadens peaks and suppresses narrow fluctuations; counts are
   conserved by shell-volume normalization. Sigma 0 also disables smoothing.
-  --no-smoothing overrides sigma and targets the original binned mapped profile.
+  For reference targets, --no-smoothing overrides sigma and targets the original binned mapped profile.
+  Step targets use analytic linear ramps and no Gaussian smoothing.
   No 'Smoothed target' line is plotted when smoothing is disabled. Binning still
   applies: --bin-width 4 is coarser than 1 A, even without Gaussian smoothing.
   Generation seeks the target under geometric/connectivity constraints; neither
@@ -401,7 +430,7 @@ def parser():
                        "calibrate": "Measure reference profile error levels (counting, orientation, placement floors), optionally compare other structures, and suggest per-element tolerances. No particle is generated."}[name]
         command = sub.add_parser(name, help=description, description=description,
                                  formatter_class=DetailedHelpFormatter,
-                                 epilog=COMMAND_EXAMPLES[name]+(SMOOTHING_HELP if name != "validate" else "")+"\n"+EXIT_HELP)
+                                 epilog=COMMAND_EXAMPLES[name]+(STEP_HELP+SMOOTHING_HELP if name != "validate" else "")+"\n"+EXIT_HELP)
         result.command_parsers.append(command)
         if name!="calibrate":
             command.add_argument("--pair-limit-override", action=PairLimitAction, metavar="PAIR=VALUE", help="Repeatable positive A/steric/pooled/reference distance override; steric uses element-derived measured ratios; all new overrides obey the covalent floor; default S-S=steric. Use S-S=reference for old spacing. Validation applies saved numeric override values")
@@ -421,17 +450,19 @@ def parser():
         verbosity.add_argument("--quiet", action="store_true", help="Suppress progress and warning summaries; errors are still printed")
         verbosity.add_argument("--verbose", action="store_true", help="Enable detailed runtime logging; per-record reference warnings remain only in JSON")
         if name != "validate":
+            command.add_argument('--step-profile', action='store_true', help='Moment-matched homogeneous control target with shared bounds and reference composition; default keeps reference-shaped profiles')
+            command.add_argument('--step-edge-width', type=finite_nonnegative, default=None, help='Linear ramp width in A centred on each step bound; 0 is a hard step; requires --step-profile')
             command.add_argument("--bin-width", type=finite_positive, default=1.0, help="Requested maximum radial shell-bin width in A; must be positive")
-            command.add_argument("--smoothing-sigma", type=finite_nonnegative, default=1.0, help="Gaussian radial smoothing sigma in A; larger values smooth more and broaden peaks; 0 disables smoothing; overridden by --no-smoothing")
-            command.add_argument("--no-smoothing", action="store_true", help="Disable Gaussian smoothing and use the original binned reference profile")
+            command.add_argument("--smoothing-sigma", type=finite_nonnegative, default=None, help="Gaussian radial smoothing sigma in A; larger values smooth more and broaden peaks; 0 disables smoothing; overridden by --no-smoothing")
+            command.add_argument("--no-smoothing", action="store_true", help="Disable Gaussian smoothing; reference targets use the original binned profile; step targets are always unsmoothed")
             command.add_argument("--radius-method", choices=("extrema", "percentile"), default="extrema", help="Infer reference bounds from minimum/maximum radii or the selected radial percentiles")
             command.add_argument("--radius-percentiles", nargs=2, type=float, default=[0.5, 99.5], metavar=("LOW", "HIGH"), help="Lower/upper radial percentiles, 0 <= LOW < HIGH <= 100; only used with --radius-method percentile; excluded atoms are reported")
             if name!="calibrate":
                 command.add_argument("--distance-percentile", type=finite_nonnegative, default=1.0, help="Nearest-neighbor percentile in [0, 100] for element-pair minimum distances; provisional")
                 command.add_argument("--min-pair-samples", type=positive_integer, default=100, help="Minimum observations for a pair-specific distance percentile; fewer use grouped normalized reference distances; provisional")
-        if name in ("generate","calibrate"):
-            command.add_argument("--inner-radius", type=finite_nonnegative, help="Inner atom-center radius in A; require 0 <= inner < outer")
-            command.add_argument("--outer-radius", type=finite_positive, help="Outer atom-center radius in A; overrides do not change local density targets")
+        if name in ("analyze","generate","calibrate"):
+            command.add_argument("--inner-radius", type=finite_nonnegative, help="Inner atom-center radius in A; with --step-profile: step half-height bound; atoms may extend --step-edge-width/2 beyond it")
+            command.add_argument("--outer-radius", type=finite_positive, help="Outer atom-center radius in A; with --step-profile: step half-height bound; atoms may extend --step-edge-width/2 beyond it")
         if name == "generate":
             command.add_argument("--center", choices=("reference", "origin"), default="reference", help="Target center: reference coordinate mean or origin (0, 0, 0)")
             command.add_argument("--mode", choices=("independent", "residue"), default="independent", help="Move individual atoms (independent) or preserve observed residue geometry with rigid moves (residue)")
@@ -472,14 +503,14 @@ def parser():
             command.set_defaults(profile_tolerance_spec=None)
             command.add_argument('--profile-tolerance',action=ProfileToleranceAction,help='Per-element normalized profile error: NUMBER, C=0.02,N=0.04,..., or C=0.02,*=0.05; each target element needs its own value or *; no automatic default')
             command.add_argument('--composition-tolerance',type=finite_nonnegative,help='Relative per-element count error limit, with a minimum one-atom allowance')
-            command.add_argument('--tolerances-from',type=Path,help='Use suggested tolerances from a calibration JSON with matching reference/model/bin/smoothing/radii; incompatible with explicit tolerance options')
+            command.add_argument('--tolerances-from',type=Path,help='Use suggested tolerances from a calibration JSON with matching reference/model/profile model/bin/smoothing/radii/step edge width; incompatible with explicit tolerance options')
         if name=='calibrate':
-            command.add_argument('--replicates',type=positive_integer,default=50,help='Independent replicates per counting, orientation and placement level')
+            command.add_argument('--replicates',type=positive_integer,default=50,help='Independent replicates per level; step targets use counting only')
             command.add_argument('--seed',type=nonnegative_integer,default=42,help='Seed for reproducible calibration resampling')
             command.add_argument('--compare',type=Path,action='append',default=[],help='Repeatable experimental comparison PDB; its own center, reference edges; report raw and count-normalized shape error')
             command.add_argument('--generated',type=Path,action='append',default=[],help='Repeatable generated PDB; check sibling report settings and use its saved center when available')
             command.add_argument('--floor-multiple',type=finite_positive,default=2.0,help='Multiply the chosen floor statistic to suggest tolerances; never applied automatically')
-            command.add_argument('--floor-basis',choices=('orientation','counting'),default='orientation',help='Reference error level used for suggestions')
+            command.add_argument('--floor-basis',choices=('orientation','counting'),default=None,help='Reference error level used for suggestions; step targets require counting')
             command.add_argument('--floor-statistic',choices=('p95','mean'),default='p95',help='Chosen floor statistic; round suggestions upward to three significant figures')
         if name == "validate":
             command.add_argument("--pdb", type=Path, required=True, help="Required generated particle PDB to revalidate")
@@ -498,13 +529,81 @@ def reference(args):
 
 
 def analysis_options(args):
+    target_options = {'step_profile': args.step_profile, 'step_edge_width': args.step_edge_width}
     if args.command=="calibrate":
         return {"width":args.bin_width,"sigma":0.0 if args.no_smoothing else args.smoothing_sigma,
-                "radius_method":args.radius_method,"percentiles":args.radius_percentiles,"compute_distances":False}
+                "radius_method":args.radius_method,"percentiles":args.radius_percentiles,"compute_distances":False, **target_options}
     return {"width": args.bin_width, "sigma": 0.0 if args.no_smoothing else args.smoothing_sigma,
             "radius_method": args.radius_method, "percentiles": args.radius_percentiles,
             "distance_percentile": args.distance_percentile, "min_samples": args.min_pair_samples,
-            "pair_limit_overrides": resolve_limit_overrides(args.pair_limit_override)}
+            "pair_limit_overrides": resolve_limit_overrides(args.pair_limit_override), **target_options}
+
+
+def resolve_target_options(args):
+    """Resolve contextual defaults and reject incompatible flags before input I/O."""
+    if args.command == 'validate':
+        return
+    if not args.step_profile and args.step_edge_width is not None:
+        raise MastercapError('--step-edge-width requires --step-profile')
+    if args.step_profile and args.smoothing_sigma is not None and args.smoothing_sigma > 0:
+        raise MastercapError('--smoothing-sigma does not apply to --step-profile targets; remove it or use --no-smoothing')
+    if args.step_profile and getattr(args, 'sulfur_residue_placement', 'off') == 'reference':
+        raise MastercapError('--sulfur-residue-placement reference is incompatible with --step-profile')
+    args.step_edge_width = 4.0 if args.step_edge_width is None else args.step_edge_width
+    args.smoothing_sigma = 0.0 if args.step_profile else (1.0 if args.smoothing_sigma is None else args.smoothing_sigma)
+    if args.command == 'calibrate':
+        if args.step_profile and args.floor_basis == 'orientation':
+            raise MastercapError('orientation floors are not defined for step targets; use --floor-basis counting')
+        if args.floor_basis is None:
+            args.floor_basis = 'counting' if args.step_profile else 'orientation'
+
+
+def target_settings(args, analysis, edges):
+    return profile_settings(analysis, edges, args.bin_width, args.radius_method, args.radius_percentiles,
+                            model='step' if args.step_profile else 'reference',
+                            step_edge_width=args.step_edge_width if args.step_profile else None)
+
+
+def configured_target(args, analysis):
+    target = build_target(analysis, args.inner_radius, args.outer_radius, step=args.step_profile,
+                          edge_width=args.step_edge_width, bin_width=args.bin_width)
+    if target.step is not None:
+        block = target.step
+        bounds, density = block['generated_bounds'], block['density']
+        sensitivity = ', '.join(f"{name} t={value['thickness']:.4f}" if 'thickness' in value else f'{name} fit unavailable'
+                                for name, value in block['sensitivity'].items())
+        LOG.info('Step target: bounds %.6f..%.6f A (t %.6f A), support %.6f..%.6f A, edge %g A; '
+                 'plateau %.6g atoms/A3 (%.3f x reference mean, %.3f x densest bin); sensitivity: %s; '
+                 'skewness reference %.6f vs step %.6f',
+                 bounds['inner'], bounds['outer'], bounds['outer']-bounds['inner'], *bounds['support'],
+                 block['edge_width'], density['plateau_total'], density['ratio_to_mean'], density['ratio_to_max_bin'],
+                 sensitivity, block['skewness']['reference'], block['skewness']['step'])
+        if density['plateau_total'] > density['reference_max_bin']:
+            LOG.warning('Step plateau density %g exceeds the densest reference bin %g; packing may fail',
+                        density['plateau_total'], density['reference_max_bin'])
+    return target
+
+
+def verify_saved_step(target, saved):
+    previous = saved.get('target', {}).get('step')
+    if target.step is None and previous is None:
+        return
+    try:
+        if target.step is None or previous is None:
+            raise ValueError('profile model')
+        current = target.step
+        if (not np.allclose([current['generated_bounds'][k] for k in ('inner', 'outer')],
+                            [previous['generated_bounds'][k] for k in ('inner', 'outer')], rtol=0, atol=1e-9)
+                or not np.allclose(current['generated_bounds']['support'], previous['generated_bounds']['support'], rtol=0, atol=1e-9)):
+            raise ValueError('bounds')
+        counts, old_counts = current['counts']['target'], previous['counts']['target']
+        if counts.keys() != old_counts.keys() or not all(np.isclose(v, old_counts[e], rtol=1e-9, atol=0) for e, v in counts.items()):
+            raise ValueError('target counts')
+        edges = saved['target']['edges']
+        if len(edges) != len(target.edges) or not np.allclose(target.edges, edges, rtol=0, atol=1e-9):
+            raise ValueError('edges')
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MastercapError(f'Recomputed step target differs from the generation report: {exc}') from exc
 
 
 def artifacts(prefix, csv=False, plot=False, pdb=False):
@@ -533,12 +632,12 @@ def base_report(args, started):
             "configuration": configuration_value(vars(args))}
 
 
-def extra_profiles(files, names, edges, original, smoothed, generated=None, *, smoothing_enabled=True):
+def extra_profiles(files, names, edges, original, smoothed, generated=None, *, smoothing_enabled=True, target_label="Smoothed target"):
     if "csv" in names:
         files[names["csv"]] = profile_csv(edges, original, smoothed, generated)
     if "plot" in names:
         LOG.info("Rendering radial profile PNG")
-        files[names["plot"]] = profile_png(edges, original, smoothed, generated, smoothing_enabled=smoothing_enabled)
+        files[names["plot"]] = profile_png(edges, original, smoothed, generated, smoothing_enabled=smoothing_enabled, target_label=target_label)
 
 
 def diagnostic(args, report, protected):
@@ -557,7 +656,7 @@ def log_warning_summary(warnings):
                     len(warnings), inferred)
 
 
-def generate_command(args, analysis, source, acquisition, started, names, preparation_timings=None):
+def generate_command(args, analysis, source, acquisition, started, names, preparation_timings=None, target=None):
     if args.seed is None:
         args.seed = secrets.randbits(63)
     if (args.seed < 0 or args.max_iterations < 0 or (args.refine_iterations is not None and args.refine_iterations < 0)
@@ -580,7 +679,8 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
     if args.refine_selection not in ("crossing", "mismatch"):
         raise MastercapError("Refinement selection must be crossing or mismatch")
     rng = np.random.default_rng(args.seed)
-    edges, profiles = target_profiles(analysis, args.inner_radius, args.outer_radius)
+    target = target or configured_target(args, analysis)
+    edges, profiles = target.edges, target.profiles
     center = analysis.center if args.center == "reference" else np.zeros(3)
     report = base_report(args, started)
     timings = dict(preparation_timings or {})
@@ -591,6 +691,8 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                    "profiles": {e: p.tolist() for e, p in profiles.items()}},
                    "calibration": ("reference_calibration_supplied" if args.tolerances_from else
                                    "manual_tolerances" if args.profile_tolerance is not None or args.composition_tolerance is not None else "not_supplied"), "pdb_convention": "TER segments; serials and chains may repeat"})
+    if target.step is not None:
+        report["target"]["step"] = target.step
     LOG.info("Selected reference: %d atoms; target radii %.3f..%.3f A; seed %d", len(analysis.structure.atoms), edges[0], edges[-1], args.seed)
     export_started = None
     try:
@@ -643,7 +745,8 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                                          reconsolidate_below=args.reconsolidate_below,
                                          reconsolidate_every=args.reconsolidate_every,
                                          reconsolidate_iterations=args.reconsolidate_iterations,
-                                         stage_progress=LOG.info)
+                                         target_model="step" if target.step else "reference",
+                                         original_profiles=target.reference_on_edges, stage_progress=LOG.info)
             except MastercapError:
                 # Search raises only for invalid settings/templates during prep.
                 timings["initialization"] += time.monotonic()-attempt_started
@@ -707,7 +810,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
         geometry = validate_geometry(reread, center, edges, analysis.limits, args.overlap_margin, mode)
         final_connectivity_check(reread, args.overlap_margin, geometry, report)
         final_pair_distance_check(reread, analysis.limits, report)
-        metrics = profile_metrics(reread, center, edges, profiles, analysis.original)
+        metrics = profile_metrics(reread, center, edges, profiles, target.reference_on_edges)
         status = acceptance(geometry, metrics, args.profile_tolerance, args.composition_tolerance)
         report.update({"geometry": geometry, "metrics": metrics, "status": status})
         log_acceptance(status, geometry, metrics, args.composition_tolerance)
@@ -735,8 +838,8 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                        "elapsed_seconds": time.monotonic()-started,
                        "peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024})
         files = {names["pdb"]: text}
-        extra_profiles(files, names, edges, analysis.original, profiles, metrics["generated_profiles"],
-                       smoothing_enabled=analysis.smoothing_sigma > 0)
+        extra_profiles(files, names, edges, target.reference_on_edges, profiles, metrics["generated_profiles"],
+                       smoothing_enabled=analysis.smoothing_sigma > 0, target_label="Step target" if target.step else "Smoothed target")
         timings["export_validation"] = time.monotonic()-export_started
         report["elapsed_seconds"] = time.monotonic()-started
         LOG.info("Serializing JSON report and publishing output files")
@@ -781,7 +884,16 @@ def validate_command(args, source, started, names):
     LOG.info("Reading generated PDB and checking provenance: %s", args.pdb)
     particle = read_pdb(args.pdb, generated=True)
     config = saved["configuration"].copy()
-    edges, profiles = target_profiles(analysis, config["inner_radius"], config["outer_radius"])
+    try:
+        target = build_target(analysis, config["inner_radius"], config["outer_radius"],
+                              step=options.get('step_profile', False), edge_width=options.get('step_edge_width', 4.0),
+                              bin_width=options['width'])
+    except MastercapError as exc:
+        if options.get('step_profile') or saved.get('target', {}).get('step'):
+            raise MastercapError(f'Recomputed step target differs from the generation report: {exc}') from exc
+        raise
+    edges, profiles = target.edges, target.profiles
+    verify_saved_step(target, saved)
     configure_tolerances(args,analysis,edges,settings_from_generation(saved),config)
     config['profile_tolerance']=args.profile_tolerance;config['composition_tolerance']=args.composition_tolerance
     center = analysis.center if config["center"] == "reference" else np.zeros(3)
@@ -812,7 +924,7 @@ def validate_command(args, source, started, names):
         publish({path:encode_json(failed)},args.overwrite,[source,args.pdb,args.report])
         LOG.error('Validation failed; audit diagnostic: %s',path)
         raise
-    metrics = profile_metrics(particle, center, edges, profiles, analysis.original)
+    metrics = profile_metrics(particle, center, edges, profiles, target.reference_on_edges)
     status = acceptance(geometry, metrics, config["profile_tolerance"], config["composition_tolerance"])
     log_acceptance(status, geometry, metrics, config['composition_tolerance'])
     report = base_report(args, started)
@@ -820,9 +932,12 @@ def validate_command(args, source, started, names):
                    "validated_pdb": str(args.pdb), "reference": analysis.structure.provenance,
                    "warnings": analysis.warnings, "distance_limit_overrides": analysis.distance_limit_overrides,
                    "distance_limits": {"-".join(k): v for k, v in analysis.limits.items()}})
+    if target.step is not None:
+        report['target'] = {'center': center.tolist(), 'edges': edges.tolist(),
+                            'profiles': {e:p.tolist() for e,p in profiles.items()}, 'step': target.step}
     files = {names["json"]: encode_json(report)}
-    extra_profiles(files, names, edges, analysis.original, profiles, metrics["generated_profiles"],
-                   smoothing_enabled=analysis.smoothing_sigma > 0)
+    extra_profiles(files, names, edges, target.reference_on_edges, profiles, metrics["generated_profiles"],
+                   smoothing_enabled=analysis.smoothing_sigma > 0, target_label="Step target" if target.step else "Smoothed target")
     LOG.info("Publishing validation report: %s", names["json"])
     publish(files, args.overwrite, [source, args.pdb, args.report]+([args.tolerances_from] if args.tolerances_from else []))
     LOG.info("Validation status: %s", status)
@@ -831,6 +946,7 @@ def validate_command(args, source, started, names):
 
 def run(args):
     started = time.monotonic()
+    resolve_target_options(args)
     LOG.info("Starting %s; output prefix: %s", args.command, args.output_prefix)
     try:
         source, acquisition = reference(args)
@@ -877,13 +993,19 @@ def run(args):
         raise
     log_warning_summary(analysis.warnings)
     if args.command=='calibrate':
-        edges,profiles=target_profiles(analysis,args.inner_radius,args.outer_radius)
-        settings=profile_settings(analysis,edges,args.bin_width,args.radius_method,args.radius_percentiles)
+        target = configured_target(args, analysis)
+        edges, profiles = target.edges, target.profiles
+        settings = target_settings(args, analysis, edges)
+        if target.step is not None:
+            LOG.info('Step calibration: reference vs step is model mismatch, not a floor; '
+                     'orientation/placement skipped; only counting sets tolerances')
         def level_progress(name,stats):
-            LOG.info('Calibration %s: %s',name,', '.join(f"{e}={value['mean']:.6g}" for e,value in stats.items()))
+            LOG.info('Calibration %s: %s','reference vs step' if name=='self' and args.step_profile else name,', '.join(f"{e}={value['mean']:.6g}" for e,value in stats.items()))
         calibration=calibrate(analysis,edges,profiles,settings,args.replicates,args.seed,args.compare,args.generated,
                               args.floor_multiple,args.floor_basis,args.floor_statistic,level_progress)
         calibration['suggested']['tolerances_from_line']=f'--tolerances-from {shlex.quote(str(names["json"]))}'
+        LOG.info('Suggestion rule: %g x %s %s; experimental comparisons %s', args.floor_multiple, args.floor_basis,
+                 args.floor_statistic, 'excluded for step targets' if args.step_profile else 'may raise tolerances')
         LOG.info('Suggested: %s',calibration['suggested']['paste_line'])
         LOG.info('Equivalent: %s',calibration['suggested']['tolerances_from_line'])
         for name,rows in [('compare',calibration['compare']),('generated',calibration['generated'])]:
@@ -892,6 +1014,7 @@ def run(args):
                 LOG.info('Calibration %s %s: %s',name,row['file'],', '.join(f'{e}={v:.6g}' for e,v in row.get('errors',row.get('shape')).items()))
         report=base_report(args,started)
         report.update(status='calibration_complete',calibration=calibration,warnings=analysis.warnings,acquisition=acquisition)
+        if target.step is not None:report['target']={'step':target.step, 'edges':edges.tolist(), 'profiles':{e:p.tolist() for e,p in profiles.items()}}
         files={names['json']:encode_json(report)}
         if args.csv:files[names['csv']]=calibration_csv(calibration)
         if args.plot:
@@ -906,20 +1029,23 @@ def run(args):
         return 0
     if args.command == "generate":
         try:
-            edges,_=target_profiles(analysis,args.inner_radius,args.outer_radius)
-            configure_tolerances(args,analysis,edges)
+            target = configured_target(args, analysis)
+            configure_tolerances(args,analysis,target.edges, target_settings(args, analysis, target.edges))
         except MastercapError as exc:
             report=base_report(args,started)
             report.update(error=str(exc),analysis=analysis.summary())
             diagnostic(args,report,protected)
             raise
-        return generate_command(args, analysis, source, acquisition, started, names, preparation_timings)
+        return generate_command(args, analysis, source, acquisition, started, names, preparation_timings, target)
     report = base_report(args, started)
     report.update({"status": "analyzed", "analysis_options": analysis_options(args),
                    "analysis": analysis.summary(), "acquisition": acquisition})
     files = {names["json"]: encode_json(report)}
-    extra_profiles(files, names, analysis.edges, analysis.original, analysis.smoothed,
-                   smoothing_enabled=analysis.smoothing_sigma > 0)
+    target = configured_target(args, analysis)
+    if target.step is not None:report['step'] = target.step
+    files[names['json']] = encode_json(report)
+    extra_profiles(files, names, target.edges, target.reference_on_edges, target.profiles,
+                   smoothing_enabled=analysis.smoothing_sigma > 0, target_label="Step target" if target.step else "Smoothed target")
     LOG.info("Serializing and publishing analysis report: %s", names["json"])
     publish(files, args.overwrite, protected)
     LOG.info("Analyzed %d atoms; report: %s", len(analysis.structure.atoms), names["json"])

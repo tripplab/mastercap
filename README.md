@@ -1,19 +1,18 @@
 # mastercap
 
-**Current version: 0.1.10**
+**Current version: 0.1.11**
 
 Reference-driven generation of spherical geometric capsid particles in Python.
-Particles approximate the radial element density and residue composition of an
-**already expanded, complete protein capsid**. They are for geometry and
+Particles derive radial element targets and residue composition from an
+**already expanded, complete protein capsid**, with an optional homogeneous
+step-profile control wall. They are for geometry and
 visualization, not chemically valid protein design or molecular dynamics.
 
-Version 0.1.10 explains loaded tolerances, per-element acceptance and early stopping
-in the terminal, and includes a calibration plot reading guide. The `calibrate`
-command suggests per-element profile tolerances; generate and validate support
-`--tolerances-from` loading with reference/settings checks. Calibration measures
-radial error scales and suggests thresholds; it never generates a particle or
-relaxes mandatory geometry. Without supplied tolerances, generation remains
-uncalibrated.
+Version 0.1.11 adds optional moment-matched homogeneous step targets for analyze,
+generate, calibrate and saved-report validation. The reference-shaped target
+remains the default. Step edges have analytic linear ramps; step calibration uses
+the counting floor, with matching target settings required when loading tolerances.
+Without supplied tolerances, generation remains uncalibrated.
 
 **Status:** geometric prototype with synthetic regression tests, complete 1CWP
 benchmarks and reference-resampling calibration. Independent experimental
@@ -175,10 +174,16 @@ their existing behavior.
 ## Geometry and profiles
 
 The reference center is the unweighted coordinate mean before radial trimming.
-Radii bound **atomic centers**, not vdW surfaces. Defaults use radial extrema;
+Reference-model radii bound **atomic centers**, not vdW surfaces. Step-mode CLI
+radii are half-height bounds and atoms may extend half the ramp width beyond
+them (see [step targets](#step-profile-control-targets)). Reference selection
+defaults use radial extrema;
 `--radius-method percentile --radius-percentiles LOW HIGH` selects an interval
 and reports excluded atoms. Excluded atoms no longer contribute to profiles or
 the selected inventory; trimming may leave partial residues.
+
+The following smoothing/mapping rules describe the default **reference-shaped
+target**; step targets use analytic ramps and no Gaussian smoothing.
 
 `--bin-width` defaults to 1 A. Uniform bins have widths no greater than requested;
 densities use exact spherical shell volumes. Gaussian smoothing is on by default
@@ -213,7 +218,7 @@ mastercap generate --input ./1cwp_full.vdb --output-prefix results/particle03 \
   --progress-interval 5 --refine-updates 50 --selection-objective total
 ```
 
-Either radius may be overridden. Profiles map by relative position through the
+For reference-shaped targets, either radius may be overridden. Profiles map by relative position through the
 thickness while retaining local number density; atom counts change with volume.
 Different element profiles can produce changed global fractions after resizing.
 Integer residue inventories approximate these objectives and report differences.
@@ -541,7 +546,8 @@ earlier, and no setting guarantees exact profile matching.
 
 Every exported particle must satisfy after PDB rounding and rereading:
 
-1. All centers within the requested radial bounds.
+1. All centers within the target support (requested radii for reference-shaped
+   targets; half-height bounds extended by half the ramp width for step targets).
 2. Center error at most 1 A.
 3. Applicable minimum distances.
 4. Internal connectivity of every residue.
@@ -684,6 +690,111 @@ iteration computes one neighbor/overlap graph on PDB-rounded coordinates and
 reuses it for checking and proposing repairs. Final export still independently
 rereads the written PDB and rebuilds its geometry checks.
 
+## Step-profile control targets
+
+`--step-profile` adds a homogeneous control arm for geometric/FEM nanoindentation
+comparisons. It fits **shared half-height bounds** to the selected reference
+atoms' count-weighted mean radius and mean squared radius. At fitted size it
+preserves every element's atom count, hence composition and mass. All elements
+share one radial shape and have constant composition through the wall. This
+removes the reference layering and outer-tail character; the skewness difference
+quantifies part of that loss. It does not make a mechanically equivalent capsid.
+
+The plateau has constant volumetric density. Each edge is softened by a **linear
+ramp centred on its bound**, width `--step-edge-width` (default 4 Å; 0 is a hard
+step). The fit includes the ramps when matching moments. At half-height bounds
+`a,b` and width `w`, atom centers may occupy **[a − w/2, b + w/2]**. Ramps cannot
+overlap: `a − w/2 >= 0` and `b − a >= w`. A fit with no valid interior solution
+fails explicitly. Shell densities are integrated analytically, including partial
+ramp bins, so changing bin alignment does not change the total material.
+
+```bash
+# Inspect the fit before generating anything.
+mastercap analyze --input ./1cwp_full.vdb --bin-width 4 --step-profile \
+  --output-prefix results/step_fit --csv --plot
+
+# Step targets use counting (not orientation) as the suggestion basis.
+mastercap calibrate --input ./1cwp_full.vdb --bin-width 4 --step-profile \
+  --replicates 50 --seed 42 --floor-multiple 2 \
+  --output-prefix results/calib_step --csv --plot
+
+mastercap generate --input ./1cwp_full.vdb --bin-width 4 --step-profile \
+  --mode independent --distribution regular \
+  --tolerances-from results/calib_step_calibration.json --allow-approximate \
+  --output-prefix results/step01 --csv --plot
+```
+
+**Resizing:** `--inner-radius` and `--outer-radius` override the step's half-height
+bounds, with omitted bounds taken from the fit. The ramp width stays fixed.
+Plateau densities stay at their fitted values; target element counts scale with
+the analytic step volume. Integer residue inventory selection then approximates
+those real-valued counts. This does not preserve the original N or moments in a
+resized particle. A half-radius pilot keeps `w=4 Å`, rather than halving `w`.
+Calibrate that new geometry separately; its support and counts differ.
+
+The JSON step block reports fitted and generated bounds, support, exact moment
+residuals, reference/target counts, plateau density versus reference mean and
+maximum unsmoothed bin density, and sensitivity fits. Hard-edge, mass-weighted,
+and depth/per-area fits are **diagnostics only**; they never choose the target.
+Per-element fits likewise diagnose differences rather than setting element-specific
+bounds. Unrepresentable diagnostic fits record an error. A plateau denser than
+the densest reference bin produces a packing warning. At fitted size the reference
+is re-binned on the step support and the report counts atoms outside it. Resized
+steps have no reference curve or `original_profile_error`; CSV original columns
+are empty. Profile PNGs always show a **Step target** line.
+
+`--smoothing-sigma > 0` is incompatible with step mode; `--no-smoothing` is
+accepted but unnecessary. `--step-edge-width` requires `--step-profile`.
+`--sulfur-residue-placement profile` follows the step S target;
+`reference` is rejected because reference shells contradict homogeneity.
+Connectivity, minimum distances and both final audits remain mandatory.
+
+Step calibration labels self-error **reference vs step**. It is the deliberate
+model mismatch, not a floor. Orientation and placement levels are marked skipped;
+the PNG/CSV omit them. The PNG adds a reference-vs-step point and a counting
+range; generated triangles still require `--generated`. Counting-floor multiples
+are reported, but orientation multiples and placement-gap closure are undefined.
+`--compare` remains measurable but **does not enlarge step tolerances**. The
+counting ×2 rule is stricter than the reference model's orientation rule, so an
+`approximate` result is expected and can be saved with `--allow-approximate`.
+This never permits failed geometry. Calibration checks include profile model and
+edge width; old reports without these fields mean reference-shaped targets.
+Standalone validation rebuilds the saved step and checks bounds, counts and edges.
+
+Crystallographic missing/disordered protein (including 1CWP N-terminal arms) is
+absent from both target models: the inner fit describes visible protein only.
+The fitted step outer bound lies inside the reference's geometric outer radius.
+Interpret indentation contact against **b**, rather than the reference R_out,
+while retaining the distinction between half-height bound and atomic support.
+
+### First 1CWP step pilots
+
+With 4 Å bins and 4 Å ramps, the fitted half-height bounds are
+**98.5680–135.4006 Å** (thickness 36.8326 Å; support 96.5680–137.4006 Å).
+Hard-edge, mass-weighted and per-area sensitivity thicknesses are respectively
+37.0537, 36.8938 and 36.1891 Å. Plateau density is 0.0335732 atoms/Å³:
+1.532 times the geometric reference mean and 0.780 times its densest bin.
+Reference skewness 0.10093 becomes −0.21264; 9,780 reference atoms lie outside
+the fitted ramp support.
+
+Seed 42, independent/regular initialization, sulfur profile placement and
+S-S=3.0 Å produced these results (multiples use the **mean** counting floor):
+
+| Geometry | Atoms | Pushes used / maximum | C error / floor | N error / floor | O error / floor | S error / floor |
+|---|---:|---:|---:|---:|---:|---:|
+| Fitted size | 214,440 | 10 / 50 | 2.39× | 1.91× | 2.85× | 0.064× |
+| Half bounds, same 4 Å ramps | 26,814 | 0 / 50 | 2.07× | 2.03× | 2.51× | 0.157× |
+
+Both finished **valid** under their own `2 × counting p95` tolerances and passed
+standalone validation and both audits (0 isolated atoms, 1 component, 0 internally
+disconnected residues). A mean-floor multiple above 2 can still pass the p95
+rule. Normal acceptance stopped them before the 50-push ceiling; this is not an
+equal-push comparison. Observed repair-search times were 152.5 s and 10.7 s,
+respectively, with first feasibility at iterations 57 and 49. Timings include
+concurrent development workload and are not isolated speed measurements.
+Detailed fits, floors, errors, runtimes and audit evidence are recorded under
+`step_profile` in [the benchmark report](benchmarks/1cwp_refinement.json).
+
 ## Calibration
 
 Calibrate one complete reference at the **same bin width, smoothing, model and
@@ -708,7 +819,7 @@ It never writes a PDB. It refuses a prefix already belonging to a generation
 report even with `--overwrite`; use a distinct prefix. Its profile analysis
 skips distance limits entirely, so it has no `--pair-limit-override` option.
 
-The reported levels use the same volume-weighted integrated absolute error as
+For the default reference-shaped model, the reported levels use the same volume-weighted integrated absolute error as
 generation, divided by each element's target count. Total is atom-weighted:
 
 - **Self:** the reference against its target; zero without smoothing, otherwise
@@ -748,7 +859,7 @@ provides `gap_closed_clipped` capped at 1. Zero denominators/nonpositive gaps ar
 null with a reason, never invented finite ratios. Log plots mark zero errors at
 an explicitly labelled display position. No Total tolerance is applied.
 
-Suggestions default to **2 times the orientation p95**, rounded upward to three
+For reference-shaped targets, suggestions default to **2 times the orientation p95**, rounded upward to three
 significant figures. Choose `--floor-multiple`, `--floor-basis counting` or
 `--floor-statistic mean` explicitly to change that rule. An explicit comparison's
 largest shape error raises the suggestion when larger. Composition is suggested
