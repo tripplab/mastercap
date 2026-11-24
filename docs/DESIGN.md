@@ -450,3 +450,9 @@ backtracking guard counters retain attempted reasons. Legacy disables both new
 routing and backtracking. These additions are explicitly reported because the
 literal local-only plan did not meet its numerical acceptance criteria.
 The search records initial feasible layering cheaply for final-change comparison.
+
+The routing strategy is exposed as --refine-transport-routing cumulative/local.
+Both nonlegacy strategies use checked half-step fallback in independent mode;
+legacy drift forces the old local path without backtracking. This permits
+controlled comparisons without assuming one finite-budget strategy is best for
+both smooth step targets and sharply layered reference targets.

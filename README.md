@@ -874,7 +874,11 @@ travel through balanced bins toward a distant deficit. Restricting transport to
 immediately adjacent surplus/deficit pairs left most remaining error unreachable:
 a direct implementation trial retained 1,835 surplus C atoms but only 4.5 atoms
 of adjacent transfer quota. This routing addition was needed to pursue the
-specified fine-bin acceptance targets. Accepted useful crossings
+specified fine-bin acceptance targets. `--refine-transport-routing local`
+selects adjacent-only routing with the new speed and guarded trials, making the
+strategy explicit for comparisons; the default is `cumulative`. Legacy drift
+always restores local routing. A routing choice can change finite-budget L1
+results for sharply layered profiles, so compare the reported element errors. Accepted useful crossings
 reset patience even when their improvement is below the usual 0.1% threshold.
 For crossing selection, effective patience is at least twice the estimated
 half-bin transit time: 50 pushes at 1 Å with auto drift. Explicit patience 0

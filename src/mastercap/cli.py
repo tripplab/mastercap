@@ -547,6 +547,7 @@ def parser():
             command.add_argument('--inter-residue-scale',type=finite_positive,default=None,help='Scale reference inter-residue floors (default 1.0); requires --inter-residue-limits reference; pair overrides take precedence')
             command.add_argument('--wall-clamp',choices=('band','legacy'),default='band',help='Repair outside atoms into a fixed seeded edge-band depth; legacy retains the old wall clamp')
             command.add_argument('--refine-drift-step',type=drift_step_spec,default='auto',help='Cumulative edge transport in A: auto=max(min step,min(max step,0.02*bin width)); checked independent half-step fallback; legacy keeps old speed/local quotas/rejection')
+            command.add_argument('--refine-transport-routing',choices=('cumulative','local'),default='cumulative',help='Cumulative imbalance carries material through intervening bins; local restricts transfers to adjacent surplus/deficit bins; legacy drift forces local routing')
             command.add_argument('--refine-transport-factor',type=finite_positive,default=2.0,help='Maximum drifters per edge/direction = ceil(factor * remaining quota); legacy drift retains old quotas')
             command.add_argument("--refine-selection", choices=("crossing", "mismatch"), default="crossing", help="Crossing targets useful adjacent-bin crossings, then drifts surplus atoms toward edges; skips previous rejected atoms. Mismatch keeps v0.1.5 rank-matched selection")
             command.add_argument("--refine-max-step", type=finite_positive, default=0.05, help="Maximum absolute requested radial profile move per selected atom in A; excludes other forces and rigid projection")
@@ -827,6 +828,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                                          reconsolidate_iterations=args.reconsolidate_iterations,
                                          wall_clamp=args.wall_clamp,step_edge_width=target.step['edge_width'] if target.step else None,
                                          refine_drift_step=args.refine_drift_step,refine_transport_factor=args.refine_transport_factor,bin_width=args.bin_width,
+                                         refine_transport_routing=args.refine_transport_routing,
                                          target_model="step" if target.step else "reference",
                                          original_profiles=target.reference_on_edges, stage_progress=LOG.info)
             except MastercapError:

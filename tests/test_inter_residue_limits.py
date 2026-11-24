@@ -103,3 +103,36 @@ def test_off_retains_legacy_component_candidate_filter_at_large_margin():
     assert len(connect_edges(s.xyz,np.array([0,1]),metadata=off,margin=2.1))==1
     on=GeometryMetadata.build(s,limits,inter_residue_limits={('C','C'):1.4})
     assert len(connect_edges(s.xyz,np.array([0,1]),metadata=on,margin=2.1))==0
+
+
+def test_old_report_without_any_revision07_fields_is_measurable(tmp_path,small_pdb):
+    import json
+    from mastercap.cli import main
+    prefix=tmp_path/'old'
+    assert main(['generate','--input',str(small_pdb),'--output-prefix',str(prefix),'--seed','42',
+                 '--refine-updates','0','--allow-approximate'])==2
+    path=prefix.with_suffix('.json');report=json.loads(path.read_text())
+    for key in ('diagnostics','inter_residue_limits','wall_clamp'):report.pop(key,None)
+    for key in ('inter_residue_limits','inter_residue_scale'):report['analysis_options'].pop(key,None)
+    report['analysis'].pop('inter_residue_limits',None)
+    for key in ('mesh_element_sizes','wall_clamp','refine_drift_step','refine_transport_factor','refine_transport_routing',
+                'inter_residue_limits','inter_residue_scale'):report['configuration'].pop(key,None)
+    report['mastercap_version']='0.1.11';path.write_text(json.dumps(report))
+    assert main(['validate','--input',str(small_pdb),'--pdb',str(prefix.with_suffix('.pdb')),'--report',str(path),
+                 '--output-prefix',str(tmp_path/'measured')])==2
+    measured=json.loads((tmp_path/'measured.json').read_text())
+    assert measured['status']==report['status'] and measured['metrics']==report['metrics']
+    assert measured['inter_residue_limits']['mode']=='off'
+    assert measured['diagnostics']['contacts']['overlap_per_atom']>0
+
+
+@pytest.mark.parametrize('option,value',[
+    ('--mesh-element-sizes','0'),('--mesh-element-sizes','nan'),('--mesh-element-sizes','.5,.5'),
+    ('--wall-clamp','bad'),('--refine-drift-step','bad'),('--refine-drift-step','0'),
+    ('--refine-transport-factor','0'),('--refine-transport-factor','nan'),
+    ('--refine-transport-routing','bad'),('--inter-residue-limits','bad'),('--inter-residue-scale','0')])
+def test_invalid_revision07_arguments_fail_before_input(option,value,capsys):
+    from mastercap.cli import main
+    with pytest.raises(SystemExit) as exc:main(['generate','--input','missing','--output-prefix','unused',option,value])
+    assert exc.value.code==2
+    assert 'Reading reference coordinates' not in capsys.readouterr().err

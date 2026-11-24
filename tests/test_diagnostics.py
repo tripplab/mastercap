@@ -56,3 +56,11 @@ def test_layering_common_helper_and_optional_drift_summary():
     assert d['layering']==radial_layering(np.array([1.,2.,3.]),np.array([0.,20.]))
     assert d['residue_drift']['median_angstrom']==pytest.approx(.2)
     assert d['residue_drift']['p95_angstrom']==pytest.approx(.29)
+
+
+def test_mesh_size_changes_only_near_gap_measurements():
+    s=atoms([[0,0,0],[3.2,0,0],[7.1,0,0]])
+    a=particle_diagnostics(s,np.zeros(3),np.array([0.,10.]),None,element_sizes=(.5,1.))
+    b=particle_diagnostics(s,np.zeros(3),np.array([0.,10.]),None,element_sizes=(.25,.5))
+    for block in ('inter_residue','walls','layering','residue_drift'):assert a[block]==b[block]
+    assert a['contacts']['overlap_per_atom']==b['contacts']['overlap_per_atom']

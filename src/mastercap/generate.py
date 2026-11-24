@@ -856,7 +856,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                 accepted, checked, previous_undone = accept_trial(candidate.xyz, trial.xyz, local, metadata, center, edges,
                                                                  margin, mode, refine_max_step, selected_indices=selected,
                                                                  return_undone=True, anchor_bins=anchor_bins,
-                                                                 backtrack=drift_step is not None and refine_selection=="crossing" and refine_transport_routing=="cumulative")
+                                                                 backtrack=drift_step is not None and refine_selection=="crossing")
                 for e, values in checked.pop("per_element").items():
                     details["per_element"].setdefault(e, {}).update(values)
                 crossings = crossing_metrics(push_radial, np.linalg.norm(accepted-center, axis=1),
