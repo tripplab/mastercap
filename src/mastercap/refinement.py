@@ -16,11 +16,20 @@ def error_summary(metrics):
     if 'held_out' in metrics:
         result.update(held_out_total=metrics['held_out']['total_profile_error'],
                       held_out_elements=metrics['held_out']['elements'])
+    if 'held_out_independent' in metrics:
+        result['held_out_independent_total'] = metrics['held_out_independent']['total_profile_error']
+    if 'dithered' in metrics:
+        result.update(dithered_total=metrics['dithered']['total_profile_error'],
+                      dithered_elements=metrics['dithered']['elements'])
     return result
 
 
 def candidate_key(metrics, objective="total"):
     summary = error_summary(metrics)
+    if 'dithered' in metrics:
+        values = list(summary['dithered_elements'].values())
+        summary = dict(summary, total_profile_error=summary['dithered_total'],
+                       mean_element_error=float(np.mean(values)), max_element_error=max(values))
     if objective == "total":
         names = ("total_profile_error", "mean_element_error", "max_element_error", "count_difference")
     elif objective == "worst-element":
@@ -114,9 +123,11 @@ def resolve_landing_depth(value, bin_width):
 
 def apply_crossing_push(force, radial, direction, element_indices, profiles, edges,
                         strength, max_step, fraction, min_step=0.002, blocked=None, anchor_bins=None, drift_step="auto", transport_factor=2.0, routing="cumulative",
-                        rng=None, landing_mode="random", landing_depth="auto", bin_width=None):
+                        rng=None, landing_mode="random", landing_depth="auto", bin_width=None,
+                        anchor_edges=None, wall_selection="edge-first"):
     """Reserve cumulative (or legacy local) edge quotas, then select near-edge drifters."""
-    drift_step = resolve_drift_step(drift_step, float(np.mean(np.diff(edges))), min_step, max_step)
+    drift_width = bin_width if anchor_edges is not None and bin_width is not None else float(np.mean(np.diff(edges)))
+    drift_step = resolve_drift_step(drift_step, drift_width, min_step, max_step)
     if not np.isfinite(transport_factor) or transport_factor<=0:
         raise MastercapError("Refine transport factor must be positive")
     if routing not in ('local','cumulative'):raise MastercapError('Transport routing must be local or cumulative')
@@ -124,6 +135,10 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
     if landing_mode not in ('random', 'legacy'):
         raise MastercapError('Refine landing mode must be random or legacy')
     width = float(np.max(np.diff(edges))) if bin_width is None else bin_width
+    if wall_selection not in ('edge-first','wall-first'):
+        raise MastercapError('Refine wall selection must be edge-first or wall-first')
+    if wall_selection == 'wall-first' and drift_step is None:
+        raise MastercapError('Wall-first selection requires an auto or numeric refine drift step')
     depth = resolve_landing_depth(landing_depth, width) if landing_mode == 'random' or landing_depth != 'auto' else 0.002
     if landing_mode == 'random' and rng is None:
         raise MastercapError('Random refinement landing requires the search RNG')
@@ -144,8 +159,31 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
     for e, indices in (sorted(element_indices.items()) if landing_mode == 'random' else element_indices.items()):
         _, _, balance = inventory[e]
         capacity = int(np.floor(fraction*len(indices)))
-        chosen, requested = [], []
+        chosen, requested, crossing_flags, wall_flags = [], [], [], []
         crossing_count = 0
+        if wall_selection == 'wall-first' and len(edges) > 2:
+            for source, destination, edge, sign, wall in ((0,1,1,1,edges[0]),
+                    (len(edges)-2,len(edges)-3,len(edges)-2,-1,edges[-1])):
+                quota = quota_for(balance,edge,source,destination,sign)
+                if balance[source] <= 0 or quota <= 0:
+                    continue
+                count = min(int(np.ceil(transport_factor*quota)), capacity-len(chosen))
+                if count <= 0:
+                    continue
+                candidates = indices[(bins[indices] == source) & ~blocked[indices] & ~used[indices]]
+                order = np.argsort(np.abs(radial[candidates]-wall),kind='stable')[:count]
+                take = candidates[order]
+                distance = np.abs(radial[take]-edges[edge])
+                reaches = distance+0.002 <= drift_step
+                move = sign*np.where(reaches,distance+0.002,drift_step)
+                crossed = np.abs(move) > distance
+                chosen.extend(take.tolist());requested.extend(move.tolist())
+                crossing_flags.extend(crossed.tolist());wall_flags.extend([True]*len(take))
+                crossing_count += int(crossed.sum())
+                balance[source] -= int(crossed.sum())
+                balance[destination] += int(crossed.sum())
+                all_drift_distances.extend(distance[~crossed].tolist())
+                used[take] = True
         for edge in range(1, len(edges)-1):
             for source, destination, sign in ((edge-1, edge, 1), (edge, edge-1, -1)):
                 remaining=quota_for(balance,edge,source,destination,sign)
@@ -162,6 +200,7 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
                 move = sign*np.minimum(distance[order]+0.002, max_step)
                 chosen.extend(take.tolist())
                 requested.extend(move.tolist())
+                crossing_flags.extend([True]*len(take));wall_flags.extend([False]*len(take))
                 used[take] = True
                 balance[source] -= len(take)
                 balance[destination] += len(take)
@@ -192,16 +231,20 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
             all_drift_distances.extend(distance[order].tolist())
             chosen.extend(take.tolist())
             requested.extend(move.tolist())
+            crossing_flags.extend([False]*len(take));wall_flags.extend([False]*len(take))
             used[take] = True
         chosen, requested = np.asarray(chosen, dtype=int), np.asarray(requested, dtype=float)
-        # Crossings come first in the existing selection order, then drifters.
-        # Non-reaching drift keeps its exact previous move and consumes no RNG.
+        crossing_flags = np.asarray(crossing_flags,dtype=bool)
+        wall_flags = np.asarray(wall_flags,dtype=bool)
+        # Wall reservations precede normal crossings/drifters when opted in.
+        # Flags retain the original edge-first order when that option is off.
+        # Non-reaching drift keeps its previous move and consumes no RNG.
         offsets = np.full(len(chosen), np.nan)
         if len(chosen):
             signs = np.sign(requested).astype(int)
             boundary = bins[chosen] + (signs > 0)
             distance = np.abs(radial[chosen]-edges[boundary])
-            reaches = np.arange(len(chosen)) < crossing_count
+            reaches = crossing_flags & ~wall_flags
             reaches |= np.abs(requested) >= distance+0.002
             if landing_mode == 'random':
                 destination_bin = bins[chosen[reaches]]+signs[reaches]
@@ -214,10 +257,10 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
                 # Measure actual legacy offsets; a capped proposal need not cross.
                 crossed = np.abs(requested) > distance
                 offsets[crossed] = np.abs(requested[crossed])-distance[crossed]
-        destination = radial_bins(radial[chosen]+requested, edges)
+        destination = radial_bins(radial[chosen]+requested, edges if anchor_edges is None else anchor_edges)
         bad_anchor = (anchor_target[chosen] >= 0) & (destination != anchor_target[chosen])
         anchor_rejected = int(bad_anchor.sum())
-        crossing_count -= int(bad_anchor[:crossing_count].sum())
+        crossing_count -= int((bad_anchor & crossing_flags).sum())
         chosen, requested = chosen[~bad_anchor], requested[~bad_anchor]
         landing_values.extend(offsets[~bad_anchor & np.isfinite(offsets)].tolist())
         force[chosen] += requested[:, None]*direction[chosen]
@@ -226,6 +269,8 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
         per_element[e] = {"selected": len(chosen), "crossing_proposals": crossing_count,
                           "drift_proposals": len(chosen)-crossing_count,
                           "anchor_bin_selection_rejections": anchor_rejected}
+        per_element[e].update(wall_first_proposals=int((wall_flags & ~bad_anchor).sum()),
+                              wall_first_crossings=int((wall_flags & crossing_flags & ~bad_anchor).sum()))
     moves = np.concatenate(absolute) if absolute else np.array([])
     chosen = np.concatenate(selected) if selected else np.array([], dtype=int)
     return {"strength": float(strength), "selected_atoms": len(chosen),
@@ -322,6 +367,8 @@ def crossing_metrics(before, after, element_indices, edges, profiles):
 
 
 def finish_push_metrics(record, summary):
+    if summary is not None:
+        record.update({k:summary[k] for k in ('dithered_total','dithered_elements','held_out_independent_total') if k in summary})
     if summary is not None and 'held_out_total' in summary:
         record.update({k: summary[k] for k in ('held_out_total', 'held_out_elements')})
     if summary is None or not record.get("profile_before"):
@@ -670,6 +717,7 @@ def errors_at_push(best_history, push_history):
             result[str(count)] = {k: best[k] for k in ('iteration','total_profile_error','element_errors')}
             result[str(count)]['push_count'] = count
             result[str(count)].update({k: best[k] for k in ('held_out_total','held_out_elements') if k in best})
+            result[str(count)].update({k: best[k] for k in ('dithered_total','held_out_independent_total') if k in best})
     return result
 
 

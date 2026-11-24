@@ -11,7 +11,7 @@ from scipy.spatial.transform import Rotation
 
 from .model import Structure, MastercapError
 from .diagnostics import radial_layering
-from .analysis import shell_volumes, Target, held_out_target
+from .analysis import shell_volumes, Target, held_out_target, dither_partitions
 from .constraints import inter_residue_configuration, GeometryMetadata, local_geometry, validate_geometry, profile_metrics, acceptance
 from .refinement import (PushController, apply_radial_push, candidate_key, error_summary,
                          slack_summary, consolidation_targets, AcceptanceController,
@@ -491,7 +491,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
            refine_selection="crossing", sulfur_residue_placement="off", consolidate_noncontact_slack="on",
            sulfur_anchor_tolerance=1.5, sulfur_anchor_spring=True, target_model="reference", original_profiles=None, wall_clamp="band", step_edge_width=None,
            refine_drift_step="auto", refine_transport_factor=2.0, bin_width=None, refine_transport_routing="cumulative",
-           refine_landing="random", refine_landing_depth="auto", held_out=None):
+           refine_landing="random", refine_landing_depth="auto", held_out=None,
+           refine_bin_dither=1, refine_wall_selection="edge-first", target_definition=None):
     if target_model not in ("reference", "step"):
         raise MastercapError("Target model must be reference or step")
     if target_model == "step" and sulfur_residue_placement == "reference":
@@ -533,17 +534,23 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     landing_depth = (resolve_landing_depth(refine_landing_depth, bin_width)
                      if (refine_selection == 'crossing' and refine_landing == 'random') or refine_landing_depth != 'auto'
                      else 0.002 if refine_landing == 'legacy' else None)
+    if refine_wall_selection not in ('edge-first','wall-first'):
+        raise MastercapError('Refine wall selection must be edge-first or wall-first')
+    if refine_wall_selection == 'wall-first' and (refine_selection != 'crossing' or refine_drift_step == 'legacy'):
+        raise MastercapError('Wall-first selection requires crossing selection and an auto or numeric refine drift step')
+    definition = target_definition if target_definition is not None else Target(edges, profiles, None)
+    if target_definition is None and target_model == 'step' and (held_out is None or refine_bin_dither != 1):
+        if step_edge_width is None:
+            raise MastercapError('Step search requires its target definition or step_edge_width to integrate continuous offset targets')
+        from .step import integral
+        a, b = edges[0]+step_edge_width/2, edges[-1]-step_edge_width/2
+        volume = 4*np.pi*integral(a, b, step_edge_width)
+        definition.step = {'generated_bounds': {'inner':a, 'outer':b}, 'edge_width':step_edge_width,
+                           'density': {'plateau_by_element': {e:float(np.sum(p*shell_volumes(edges))/volume) for e,p in profiles.items()}}}
     if held_out is None:
-        definition = Target(edges, profiles, None)
-        if target_model == 'step':
-            if step_edge_width is None:
-                raise MastercapError('Step search requires held_out_target(target) or the step_edge_width to integrate its continuous held-out target')
-            from .step import integral
-            a, b = edges[0]+step_edge_width/2, edges[-1]-step_edge_width/2
-            volume = 4*np.pi*integral(a, b, step_edge_width)
-            definition.step = {'generated_bounds': {'inner':a, 'outer':b}, 'edge_width':step_edge_width,
-                               'density': {'plateau_by_element': {e:float(np.sum(p*shell_volumes(edges))/volume) for e,p in profiles.items()}}}
         held_out = held_out_target(definition)
+    partitions = dither_partitions(definition, refine_bin_dither)
+    independent = held_out if refine_bin_dither == 1 else held_out_target(definition, 1/(2*refine_bin_dither))
     drift_step=resolve_drift_step(refine_drift_step,bin_width,refine_min_step,refine_max_step)
     patience=effective_patience(refine_patience,bin_width,drift_step) if refine_selection=='crossing' else refine_patience
     if not np.isfinite(refine_transport_factor) or refine_transport_factor<=0:
@@ -563,6 +570,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     rotations = initialize(structure, analysis, edges, profiles, center, rng, mode, distribution, groups=groups,
                            sulfur_residue_placement=sulfur_residue_placement, sulfur_anchors=anchors)
     depths,wall_report=wall_depths(edges,len(structure.atoms),rng,wall_clamp,step_edge_width if target_model=="step" else None)
+    wall_report.update(clamp_events_repair=0, clamp_events_refinement=0)
     anchor_bins = (anchors.indices, radial_bins(anchors.radii, edges)) if len(anchors.indices) else None
     sulfur_initial_error = sulfur_first_error = None
     sulfur_first_observations = None
@@ -579,6 +587,10 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     for e, profile in profiles.items():
         indices = metadata.element_indices[e]
         quantiles[e] = profile_quantiles(profile, edges, len(indices))
+    partition_quantiles = [quantiles]
+    if refine_selection == 'mismatch' and refine_bin_dither > 1:
+        partition_quantiles.extend({e:profile_quantiles(p,part.edges,len(metadata.element_indices[e]))
+                                   for e,p in part.profiles.items()} for part in partitions[1:])
     best, best_key = None, (float("inf"),)*4
     first_feasible = None
     first_layering = None
@@ -629,7 +641,9 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                                      local=local, metadata=metadata)
         measure_held = iteration == 0 or geometry['mandatory_pass'] or controller.pending is not None
         metrics = profile_metrics(candidate, center, edges, profiles, analysis.original if target_model == "reference" else original_profiles,
-                                  metadata=metadata, held_out=held_out if measure_held else None)
+                                  metadata=metadata, held_out=held_out if measure_held else None,
+                                  held_out_independent=independent if measure_held else None,
+                                  partitions=partitions if refine_bin_dither > 1 else None)
         if initial_metrics is None:
             initial_metrics = {"total_profile_error": metrics["total_profile_error"], "elements": metrics["elements"]}
             sulfur_initial_error = metrics["elements"].get("S", {}).get("profile_error")
@@ -680,6 +694,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                                    f"total={summary['total_profile_error']:.6f}, "
                                    f"max element={summary['max_element_error']:.6f} ({summary['worst_element']}); "
                                    f"objective={selection_objective}")
+                    if refine_bin_dither > 1:
+                        stage_progress(f"Ranking measure: dithered_mean ({refine_bin_dither} partitions), total={summary['dithered_total']:.6f}")
         since_consolidation = profile_updates-last_consolidation_update
         if (phase == "refine" and geometry["mandatory_pass"] and not rolled_back
                 and reconsolidate_iterations and since_consolidation >= 2 and consolidation_failures <= 3
@@ -843,6 +859,9 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         before_push = None
         # Soft radial transport; rank by current radius for each element.
         if geometry["mandatory_pass"] and phase == "refine":
+            partition_index = profile_updates % refine_bin_dither
+            partition = partitions[partition_index]
+            transport_edges, transport_profiles = partition.edges, partition.profiles
             push_force = pieces["radial_push"]
             push_source = candidate if refine_acceptance == "per-atom" else structure
             push_offset = push_source.xyz-center
@@ -851,13 +870,16 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             push_direction[push_radial < 1e-12] = [1, 0, 0]
             if refine_selection == "crossing":
                 details, selected = apply_crossing_push(push_force, push_radial, push_direction, metadata.element_indices,
-                                                       profiles, edges, controller.strength, refine_max_step,
+                                                       transport_profiles, transport_edges, controller.strength, refine_max_step,
                                                        refine_fraction, refine_min_step, previous_undone, anchor_bins=anchor_bins,
                                                        drift_step="legacy" if drift_step is None else drift_step, transport_factor=refine_transport_factor,routing=refine_transport_routing,
-                                                       rng=rng, landing_mode=refine_landing, landing_depth=refine_landing_depth, bin_width=bin_width)
+                                                       rng=rng, landing_mode=refine_landing, landing_depth=refine_landing_depth, bin_width=bin_width,
+                                                       anchor_edges=edges if refine_bin_dither > 1 else None,
+                                                       wall_selection=refine_wall_selection)
             else:
-                details, selected = apply_radial_push(push_force, push_radial, push_direction, metadata.element_indices, quantiles,
+                details, selected = apply_radial_push(push_force, push_radial, push_direction, metadata.element_indices, partition_quantiles[partition_index],
                                                       controller.strength, refine_max_step, refine_fraction, refine_min_step)
+            details['dither_fraction'] = partition.fraction
             scaled = neighbor_forces == "scaled"
             neighbor_details = characteristic_forces(
                 pieces["nearest_neighbor"], push_source, analysis, metadata, mode=neighbor_forces, margin=margin, guard=refine_slack,
@@ -877,7 +899,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             if refine_acceptance == "per-atom":
                 trial = Structure(structure.atoms, candidate.xyz.copy())
                 update_positions(trial, push_force, groups, mode, max_move=move_cap)
-                trial_reach = max(requested_reach, float(np.linalg.norm(trial.xyz-candidate.xyz, axis=1).max())) if random_crossing else refine_max_step
+                full_envelope = random_crossing or refine_bin_dither > 1 or refine_wall_selection == 'wall-first'
+                trial_reach = max(requested_reach, float(np.linalg.norm(trial.xyz-candidate.xyz, axis=1).max())) if full_envelope else refine_max_step
                 accepted, checked, previous_undone = accept_trial(candidate.xyz, trial.xyz, local, metadata, center, edges,
                                                                  margin, mode, trial_reach, selected_indices=selected,
                                                                  return_undone=True, anchor_bins=anchor_bins,
@@ -885,7 +908,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                 for e, values in checked.pop("per_element").items():
                     details["per_element"].setdefault(e, {}).update(values)
                 crossings = crossing_metrics(push_radial, np.linalg.norm(accepted-center, axis=1),
-                                             metadata.element_indices, edges, profiles)
+                                             metadata.element_indices, transport_edges, transport_profiles)
                 for e, values in crossings.items():
                     details["per_element"].setdefault(e, {}).update(values)
                 details.update(checked)
@@ -908,6 +931,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                 del local, force, push_force, pieces
                 continue
         wall_report['clamp_events']+=clamp_events
+        wall_report['clamp_events_refinement' if geometry['mandatory_pass'] else 'clamp_events_repair'] += clamp_events
         update_positions(structure, force, groups, mode,
                          max_move=move_cap if before_push is not None else 0.2)
         if before_push is not None:
@@ -946,6 +970,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     if termination == 'time_limit':
         logging.getLogger(__name__).warning('Search ended by time limit after %d of %d pushes; results depend on machine speed and are not reproducible by seed',profile_updates,refine_updates)
     report["profile_error_objective"] = selection_objective
+    report['ranking_measure'] = 'dithered_mean' if refine_bin_dither > 1 else 'own_bin'
     report.update({"slack_at_first_feasible": slack_first, "slack_after_consolidation": slack_after,
                    "slack_at_refinement_start": slack_refinement,
                    "consolidation_completed": consolidation_completed,
@@ -970,6 +995,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                    "refinement_settings": {"updates": refine_updates, "iteration_cap": refine_iterations,
                        "patience": refine_patience, "effective_patience":patience, "drift_step":refine_drift_step,
                        "landing_mode":refine_landing, "landing_depth":landing_depth,
+                       "bin_dither":refine_bin_dither, "dither_fractions":[p.fraction for p in partitions],
+                       "wall_selection":refine_wall_selection,
                        "effective_drift_step_angstrom":drift_step, "transport_factor":refine_transport_factor, "transport_routing":("local" if drift_step is None else refine_transport_routing) if refine_selection=="crossing" else "not_applicable", "improvement_relative": improvement_relative,
                        "starting_strength": refine_strength, "minimum_strength": controller.minimum,
                        "maximum_strength": controller.maximum, "fraction": refine_fraction,

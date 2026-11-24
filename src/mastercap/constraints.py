@@ -216,7 +216,8 @@ def validate_geometry(structure, center, edges, limits, margin=0.0, mode="indepe
     return report
 
 
-def profile_metrics(structure, center, edges, target, original=None, *, metadata=None, held_out=None):
+def profile_metrics(structure, center, edges, target, original=None, *, metadata=None, held_out=None,
+                    held_out_independent=None, partitions=None):
     elements = structure.elements if metadata is None else metadata.elements
     generated = histogram(structure, center, edges, target, atom_elements=elements)
     volumes = shell_volumes(edges)
@@ -237,12 +238,38 @@ def profile_metrics(structure, center, edges, target, original=None, *, metadata
         total_target += expected
     result = {"elements": reports, "total_profile_error": total_error / total_target if total_target else None,
               "generated_profiles": {e: p.tolist() for e, p in generated.items()}}
+    k = len(partitions) if partitions is not None else 1
     if held_out is not None:
         held_edges, held_profiles = held_out
         measured = profile_metrics(structure, center, held_edges, held_profiles, metadata=metadata)
-        result['held_out'] = {'offset_fraction': 0.5, 'edges_count': len(held_edges),
+        result['held_out'] = {'offset_fraction': 0.5, 'used_in_ranking': k > 1 and k % 2 == 0, 'edges_count': len(held_edges),
                               'elements': {e: v['profile_error'] for e, v in measured['elements'].items()},
                               'total_profile_error': measured['total_profile_error']}
+    if held_out_independent is None and held_out is not None and k == 1:
+        held_out_independent = held_out
+    if held_out_independent is not None:
+        independent_edges, independent_profiles = held_out_independent
+        if k == 1 and held_out is not None:
+            result['held_out_independent'] = dict(result['held_out'], used_in_ranking=False)
+        else:
+            measured = profile_metrics(structure, center, independent_edges, independent_profiles, metadata=metadata)
+            result['held_out_independent'] = {'offset_fraction': 1/(2*k), 'used_in_ranking': False,
+                'edges_count': len(independent_edges),
+                'elements': {e:v['profile_error'] for e,v in measured['elements'].items()},
+                'total_profile_error': measured['total_profile_error']}
+    if k > 1:
+        measurements = [result]
+        for partition in partitions[1:]:
+            if partition.fraction == 0.5 and 'held_out' in result:
+                measured = result['held_out']
+                measurements.append({'total_profile_error': measured['total_profile_error'],
+                                      'elements': {e:{'profile_error':v} for e,v in measured['elements'].items()}})
+            else:
+                measurements.append(profile_metrics(structure, center, partition.edges, partition.profiles, metadata=metadata))
+        result['dithered'] = {'k': k, 'fractions': [p.fraction for p in partitions],
+            'elements': {e:float(np.mean([m['elements'][e]['profile_error'] or 0. for m in measurements])) for e in target},
+            'total_profile_error': float(np.mean([m['total_profile_error'] for m in measurements])),
+            'per_partition_total': [m['total_profile_error'] for m in measurements]}
     return result
 
 

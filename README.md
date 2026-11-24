@@ -1,6 +1,6 @@
 # mastercap
 
-**Current version: 0.1.13**
+**Current version: 0.1.14**
 
 Reference-driven generation of spherical geometric capsid particles in Python.
 Particles derive radial element targets and residue composition from an
@@ -8,15 +8,17 @@ Particles derive radial element targets and residue composition from an
 step-profile control wall. They are for geometry and
 visualization, not chemically valid protein design or molecular dynamics.
 
-Version 0.1.13 adds random crossing landings, interior-edge concentration
-diagnostics and a half-bin-offset held-out profile error. Reference/step targets,
-mandatory geometry and calibration definitions are unchanged. Use
+Version 0.1.14 adds opt-in bin dithering, opt-in wall-first transport, an
+independent held-out measure and contact-zone diagnostics. Defaults retain
+v0.1.13 transport and ranking. Reference/step targets, mandatory geometry and
+calibration definitions are unchanged. Use
 `--refine-landing legacy` for v0.1.12 landing behavior. Add it to
 `--wall-clamp legacy --refine-drift-step legacy` for the earlier search behavior.
 
 **Status:** geometric prototype with synthetic regression tests, complete 1CWP
-benchmarks through v0.1.12 and reference-resampling calibration. The v0.1.13
-changes and new tests have not been executed; benchmarks are user-run.
+benchmarks through v0.1.12 and reference-resampling calibration. The v0.1.14
+revision is implementation only: no tests were added or run and no benchmarks
+were run. Its new behaviours await user validation.
 Independent experimental
 validation and broader capsid coverage remain pending.
 The bounded heuristic search may fail to find a feasible particle.
@@ -267,11 +269,13 @@ validation remains independent.
 | `--refine-updates` | 50 | Maximum pushes, including attempts subsequently rolled back. |
 | `--refine-iterations` | unset | Optional cap on all iterations since first feasible geometry, including repair and rollback; off by default. |
 | `--refine-patience` | 10 | Pushes without significant improvement before stopping; 0 disables this check. |
+| `--refine-bin-dither` | 1 | Opt-in N offset partitions; cycle transport and rank by mean errors when N > 1. |
+| `--refine-wall-selection` | `edge-first` | Opt-in `wall-first` starts with nearest-wall atoms in surplus wall bins; requires crossing selection and fixed-speed drift. |
 | `--refine-strength` | 0.005 | Radial strength; fixed by default. |
 | `--refine-strength-control` | `fixed` | Keep strength fixed, follow primary profile `gain`, or restore `acceptance` feedback. Applies to per-atom acceptance. |
 | `--refine-min-step` | 0.002 A | Raise nonzero requests below this size when the desired distance is at least this large; 0 disables; must not exceed max step. |
 | `--refine-selection` | `crossing` | Reserve useful adjacent-bin crossings then drift toward edges; `mismatch` retains v0.1.5 rank matching. |
-| `--refine-max-step` | 0.05 A | Cap on the requested radial profile contribution per selected atom. |
+| `--refine-max-step` | 0.05 A | Crossing candidate reach; random crossing requests can add landing depth. Legacy/mismatch retain the original profile-move cap. |
 | `--refine-fraction` | 0.2 | Per-element crossing/drift budget rounds down; mismatch rounds up. |
 | `--refine-recovery-limit` | 10 | Repair updates allowed after damage; 0 restores immediately if the next state is invalid. |
 | `--neighbor-forces` | `off` | Disable statistical neighbor forces; `scaled` follows push controls, `fixed` uses coefficient 0.002 on all atoms. |
@@ -538,7 +542,9 @@ below-floor strength. This is a controller stop, not proof of infeasibility.
 
 `total` ranks total error, then mean element error, then maximum element error,
 then count difference. `worst-element` ranks maximum, mean, total, then count
-difference. Both preserve per-element measurements, including S. A significant
+difference. Both preserve per-element measurements, including S. The
+ranking uses own-bin errors by default, or partition-mean errors when
+`--refine-bin-dither N` has N > 1. Tolerances always use own-bin errors. A significant
 improvement resets patience when the primary ranking error decreases by more than
 0.1% relative to its last significant improvement (absolute floor 1e-12).
 Smaller improvements can still replace the best candidate without resetting
@@ -1046,14 +1052,91 @@ including validation of older particles with their matching generation reports:
   Push records contain `held_out_total` and `held_out_elements`; checkpoint
   values in `errors_at_push` come from the same best candidate as own-bin values.
 
-Compare particles using **held-out error together with edge-concentration
-ratios**, as well as the existing packing and wall diagnostics. Neither new
-measurement affects candidate ranking, acceptance, exit codes, or calibration.
+With dithering off, compare particles using **held-out error together with
+edge-concentration ratios**, as well as the existing packing and wall diagnostics.
+These measurements do not affect ranking when dithering is off, or acceptance,
+exit codes, or calibration. With dithering on, use the independent held-out below.
 Tolerances still apply to own-bin errors. Random requested endpoints do not
 guarantee an unbiased accepted distribution: geometry checks and backtracking
 can change them, so inspect these diagnostics in user-run benchmarks. This
-revision has no measured improvement claim. Bin dithering and held-out ranking
-remain unimplemented pending a separate specification; no bins are randomized.
+v0.1.13 revision made no measured improvement claim and did not include
+dithering. The opt-in v0.1.14 extension is described below.
+
+## Dithering, wall-first transport and contact zones (v0.1.14)
+
+The supplied run8 observations on v0.1.13 showed correct 1 Å ramp-bin counts
+but 2.5–3× excess in the outermost 0.5–1 Å and depletion 3–4 Å inside. Fixed
+bins cannot see this within-bin bias. Normal edge-first selection also removes
+the atoms nearest the interior edge of a surplus wall bin, leaving those nearest
+the wall. These observations motivate the opt-in controls; no new benchmark
+results are claimed here.
+
+**Defaults remain `--refine-bin-dither 1 --refine-wall-selection edge-first`.**
+They preserve v0.1.13 transport, RNG draws, own-bin ranking and acceptance, with
+additional diagnostic/report fields. Time-limited runs can still vary with
+machine speed and diagnostic overhead.
+
+With `--refine-bin-dither N`, fixed partitions have offsets
+`0, 1/N, ..., (N-1)/N`. Fraction zero retains the exact generation edges and
+profiles; each other partition has partial wall bins and exactly integrated
+targets. Continuous step ramps use analytic integrals; reference-shaped targets
+use spherical volume overlaps. Every element's target total is checked to
+relative tolerance 1e-9. Push p uses partition `p % N`, counting all attempted
+pushes, including rolled-back ones. The mismatch selector also cycles its
+partition-specific quantiles. Sulfur anchors, bounds and final geometry remain
+on the **generation** edges. Drift speed, landing depth and effective patience
+retain the generation bin width; actual destination widths still cap landings.
+
+For N > 1, `metrics.dithered` contains mean per-element and atom-weighted total
+errors plus each partition's total. Ranking and significant-improvement patience
+use this mean, respecting the total/worst-element objective order; the useful
+crossings exception remains. Composition terms and all tolerance/acceptance
+checks remain unchanged and use own-bin errors. Reports identify
+`ranking_measure`, fractions and per-push `dither_fraction`; best-candidate
+checkpoints retain both own-bin and dithered values from the same structure.
+
+`--refine-wall-selection wall-first` first selects nearest-wall atoms from
+surplus first/last bins when the routing quota toward the interior is positive.
+It selects at most `ceil(transport_factor * quota)` atoms within the remaining
+per-element budget, moves them away from the wall, and marks them used before
+normal crossing/drift selection. Crossing proposals reduce the edge balance;
+non-crossing proposals remain in transit. Landing and anchor checks are retained,
+and accepted crossing metrics still use the actual checked moves. Per-element
+records add `wall_first_proposals` and `wall_first_crossings`. This selector
+requires `--refine-selection crossing` and an auto/numeric drift step: legacy
+strength-scaled drift has no fixed speed for its wall-first rule. Legacy landing
+is supported. Clamp behavior is unchanged; counts split into
+`clamp_events_repair` and `clamp_events_refinement`, whose sum is `clamp_events`.
+
+Example additions to a generation command:
+
+```bash
+--refine-bin-dither 4 --refine-wall-selection wall-first
+```
+
+Use these measures together when comparing particles:
+
+- **Own-bin error:** unchanged generation partition; still the tolerance measure.
+- **Dithered mean:** the optimized ranking measure only when N > 1.
+- **Half-bin held-out:** offset 0.5; `used_in_ranking` is true for even N > 1,
+  because this partition is then included in the mean. It is no longer independent.
+- **Independent held-out:** offset `1/(2N)`, never used in ranking. For N=1 it
+  equals half-bin held-out; both blocks are written. For N=4 its offset is 0.125.
+  Pushes and checkpoints include `held_out_independent_total`.
+- **Contact zones:** `diagnostics.contact_zone` records 20 shells of 0.25 Å
+  in the 5 Å next to each wall (clipped for thin supports). It reports observed
+  and exactly integrated expected total densities, their ratios, normalized
+  zone error, observed/expected count in the nearest 0.5 Å, and the ratio of
+  least-squares density slopes versus radius. Zero expectations give null ratios;
+  a flat expected zone gives a null slope ratio. These are atom-centre measures,
+  not exact voxel diagnostics, although ramp scale and wall excess also affect
+  vdW-sphere meshes. They never change quality status.
+
+Standalone `validate` needs no new options: it restores N from the generation
+report, defaulting to 1 for older reports, and computes all applicable measures.
+Calibration remains on the generation bins; no dithered-error calibration is
+introduced. This revision adds no tests and runs no code or benchmarks; the
+new opt-in behavior and diagnostics await user verification.
 
 ## Calibration
 
