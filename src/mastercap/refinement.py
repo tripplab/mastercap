@@ -8,11 +8,15 @@ from .model import MastercapError
 def error_summary(metrics):
     errors = {e: float(m["profile_error"] or 0.0) for e, m in metrics["elements"].items()}
     worst = max(errors, key=errors.get)
-    return {"total_profile_error": float(metrics["total_profile_error"]),
+    result = {"total_profile_error": float(metrics["total_profile_error"]),
             "mean_element_error": float(np.mean(list(errors.values()))),
             "max_element_error": errors[worst], "worst_element": worst,
             "count_difference": float(sum(abs(m["count_difference"]) for m in metrics["elements"].values())),
             "element_errors": errors}
+    if 'held_out' in metrics:
+        result.update(held_out_total=metrics['held_out']['total_profile_error'],
+                      held_out_elements=metrics['held_out']['elements'])
+    return result
 
 
 def candidate_key(metrics, objective="total"):
@@ -98,14 +102,31 @@ def effective_patience(patience, bin_width, drift_step):
     return max(patience,2*int(np.ceil(.5*bin_width/drift_step))) if patience and drift_step is not None else patience
 
 
+def resolve_landing_depth(value, bin_width):
+    try:
+        depth = min(0.25*bin_width, 0.25) if value == 'auto' else float(value)
+    except (ValueError, TypeError):
+        depth = np.nan
+    if not np.isfinite(depth) or not 0.002 <= depth <= 0.5*bin_width:
+        raise MastercapError(f'Refine landing depth must be auto or in [0.002, {0.5*bin_width:g}] A for bin width {bin_width:g} A')
+    return depth
+
+
 def apply_crossing_push(force, radial, direction, element_indices, profiles, edges,
-                        strength, max_step, fraction, min_step=0.002, blocked=None, anchor_bins=None, drift_step="auto", transport_factor=2.0, routing="cumulative"):
+                        strength, max_step, fraction, min_step=0.002, blocked=None, anchor_bins=None, drift_step="auto", transport_factor=2.0, routing="cumulative",
+                        rng=None, landing_mode="random", landing_depth="auto", bin_width=None):
     """Reserve cumulative (or legacy local) edge quotas, then select near-edge drifters."""
     drift_step = resolve_drift_step(drift_step, float(np.mean(np.diff(edges))), min_step, max_step)
     if not np.isfinite(transport_factor) or transport_factor<=0:
         raise MastercapError("Refine transport factor must be positive")
     if routing not in ('local','cumulative'):raise MastercapError('Transport routing must be local or cumulative')
     if drift_step is None:routing='local'
+    if landing_mode not in ('random', 'legacy'):
+        raise MastercapError('Refine landing mode must be random or legacy')
+    width = float(np.max(np.diff(edges))) if bin_width is None else bin_width
+    depth = resolve_landing_depth(landing_depth, width) if landing_mode == 'random' or landing_depth != 'auto' else 0.002
+    if landing_mode == 'random' and rng is None:
+        raise MastercapError('Random refinement landing requires the search RNG')
     def quota_for(balance,edge,source,destination,sign):
         if routing=='cumulative':
             flux=float(np.sum(balance[:edge]))*sign
@@ -119,7 +140,8 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
         anchor_target[anchor_bins[0]] = anchor_bins[1]
     selected, absolute, per_element = [], [], {}
     all_drift_distances=[]
-    for e, indices in element_indices.items():
+    landing_values=[]
+    for e, indices in (sorted(element_indices.items()) if landing_mode == 'random' else element_indices.items()):
         _, _, balance = inventory[e]
         capacity = int(np.floor(fraction*len(indices)))
         chosen, requested = [], []
@@ -172,11 +194,32 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
             requested.extend(move.tolist())
             used[take] = True
         chosen, requested = np.asarray(chosen, dtype=int), np.asarray(requested, dtype=float)
+        # Crossings come first in the existing selection order, then drifters.
+        # Non-reaching drift keeps its exact previous move and consumes no RNG.
+        offsets = np.full(len(chosen), np.nan)
+        if len(chosen):
+            signs = np.sign(requested).astype(int)
+            boundary = bins[chosen] + (signs > 0)
+            distance = np.abs(radial[chosen]-edges[boundary])
+            reaches = np.arange(len(chosen)) < crossing_count
+            reaches |= np.abs(requested) >= distance+0.002
+            if landing_mode == 'random':
+                destination_bin = bins[chosen[reaches]]+signs[reaches]
+                cap = np.minimum(depth, 0.5*np.diff(edges)[destination_bin])
+                if np.any(cap < 0.002):
+                    raise MastercapError('Destination bin is too narrow for the 0.002 A minimum landing depth')
+                offsets[reaches] = 0.002+rng.random(np.count_nonzero(reaches))*(cap-0.002)
+                requested[reaches] = signs[reaches]*(distance[reaches]+offsets[reaches])
+            else:
+                # Measure actual legacy offsets; a capped proposal need not cross.
+                crossed = np.abs(requested) > distance
+                offsets[crossed] = np.abs(requested[crossed])-distance[crossed]
         destination = radial_bins(radial[chosen]+requested, edges)
         bad_anchor = (anchor_target[chosen] >= 0) & (destination != anchor_target[chosen])
         anchor_rejected = int(bad_anchor.sum())
         crossing_count -= int(bad_anchor[:crossing_count].sum())
         chosen, requested = chosen[~bad_anchor], requested[~bad_anchor]
+        landing_values.extend(offsets[~bad_anchor & np.isfinite(offsets)].tolist())
         force[chosen] += requested[:, None]*direction[chosen]
         selected.append(chosen)
         absolute.append(np.abs(requested))
@@ -192,7 +235,10 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
             "fraction": float(fraction), "max_step_angstrom": float(max_step), "per_element": per_element,
             "transport_routing":routing, "mean_distance_to_edge_of_drifters":float(np.mean(all_drift_distances)) if all_drift_distances else None,
             "drift_proposals":sum(p['drift_proposals'] for p in per_element.values()),
-            "crossing_proposals":sum(p['crossing_proposals'] for p in per_element.values())}, chosen
+            "crossing_proposals":sum(p['crossing_proposals'] for p in per_element.values()),
+            "landing": {"mode": landing_mode, "depth_max": float(depth),
+                        "crossing_moves": len(landing_values),
+                        "mean_landing_depth": float(np.mean(landing_values)) if landing_values else None}}, chosen
 
 
 def damage_summary(iteration, geometry):
@@ -276,6 +322,8 @@ def crossing_metrics(before, after, element_indices, edges, profiles):
 
 
 def finish_push_metrics(record, summary):
+    if summary is not None and 'held_out_total' in summary:
+        record.update({k: summary[k] for k in ('held_out_total', 'held_out_elements')})
     if summary is None or not record.get("profile_before"):
         return
     for e, after in summary["element_errors"].items():
@@ -621,6 +669,7 @@ def errors_at_push(best_history, push_history):
             best = eligible[-1]
             result[str(count)] = {k: best[k] for k in ('iteration','total_profile_error','element_errors')}
             result[str(count)]['push_count'] = count
+            result[str(count)].update({k: best[k] for k in ('held_out_total','held_out_elements') if k in best})
     return result
 
 

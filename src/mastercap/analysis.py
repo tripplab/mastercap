@@ -262,6 +262,44 @@ class Target:
     step: dict | None = None
 
 
+def target_on_edges(target, new_edges):
+    """Integrate the unchanged continuous step or piecewise-constant target."""
+    new_edges = np.asarray(new_edges, dtype=float)
+    if (new_edges.ndim != 1 or len(new_edges) < 2 or not np.isfinite(new_edges).all()
+            or np.any(np.diff(new_edges) <= 0) or new_edges[0] < target.edges[0]
+            or new_edges[-1] > target.edges[-1]):
+        raise MastercapError('New target edges must increase within the target support')
+    volumes = shell_volumes(new_edges)
+    if target.step:
+        from .step import integral
+        block = target.step
+        a, b = (block['generated_bounds'][k] for k in ('inner', 'outer'))
+        integrals = np.array([4*np.pi*integral(a, b, block['edge_width'], lower=lo, upper=hi)
+                              for lo, hi in zip(new_edges[:-1], new_edges[1:])])
+        return {e: block['density']['plateau_by_element'][e]*integrals/volumes
+                for e in target.profiles}
+    # Walk the two partitions in linear time; avoid an O(number_of_bins^2) array.
+    counts = {e: np.zeros(len(volumes)) for e in target.profiles}
+    i = j = 0
+    while i < len(volumes) and j < len(target.edges)-1:
+        lo, hi = max(new_edges[i], target.edges[j]), min(new_edges[i+1], target.edges[j+1])
+        if hi > lo:
+            volume = 4*np.pi/3*(hi**3-lo**3)
+            for e, density in target.profiles.items():
+                counts[e][i] += density[j]*volume
+        if new_edges[i+1] <= target.edges[j+1]:
+            i += 1
+        else:
+            j += 1
+    return {e: value/volumes for e, value in counts.items()}
+
+
+def held_out_target(target):
+    from .radial import offset_edges
+    edges = offset_edges(target.edges, 0.5)
+    return edges, target_on_edges(target, edges)
+
+
 def build_target(analysis, inner=None, outer=None, *, step=False, edge_width=4.0, bin_width=None):
     """Single target definition for fitting, generation, calibration and validation."""
     if not step:

@@ -216,7 +216,7 @@ def validate_geometry(structure, center, edges, limits, margin=0.0, mode="indepe
     return report
 
 
-def profile_metrics(structure, center, edges, target, original=None, *, metadata=None):
+def profile_metrics(structure, center, edges, target, original=None, *, metadata=None, held_out=None):
     elements = structure.elements if metadata is None else metadata.elements
     generated = histogram(structure, center, edges, target, atom_elements=elements)
     volumes = shell_volumes(edges)
@@ -235,8 +235,15 @@ def profile_metrics(structure, center, edges, target, original=None, *, metadata
             reports[e]["original_profile_error"] = float(np.sum(np.abs(generated[e] - original[e]) * volumes) / denom) if denom else None
         total_error += error
         total_target += expected
-    return {"elements": reports, "total_profile_error": total_error / total_target if total_target else None,
-            "generated_profiles": {e: p.tolist() for e, p in generated.items()}}
+    result = {"elements": reports, "total_profile_error": total_error / total_target if total_target else None,
+              "generated_profiles": {e: p.tolist() for e, p in generated.items()}}
+    if held_out is not None:
+        held_edges, held_profiles = held_out
+        measured = profile_metrics(structure, center, held_edges, held_profiles, metadata=metadata)
+        result['held_out'] = {'offset_fraction': 0.5, 'edges_count': len(held_edges),
+                              'elements': {e: v['profile_error'] for e, v in measured['elements'].items()},
+                              'total_profile_error': measured['total_profile_error']}
+    return result
 
 
 def acceptance(geometry, metrics, profile_tolerance, composition_tolerance):

@@ -51,7 +51,7 @@ def test_crossing_selection_cannot_move_anchor_out_of_target_bin():
     force=np.zeros((2,3)); direction=np.tile([1.,0,0],(2,1))
     profiles={'S':np.array([0.,2.])}
     report,chosen=apply_crossing_push(force,radial,direction,{'S':np.arange(2)},profiles,np.array([1.,2.,3.]),
-                                     .005,.05,1.,anchor_bins=(np.array([0]),np.array([0])))
+                                     .005,.05,1.,anchor_bins=(np.array([0]),np.array([0])),landing_mode='legacy')
     assert 0 not in chosen
     assert report['per_element']['S']['anchor_bin_selection_rejections']==1
     assert np.array_equal(force[0],np.zeros(3))

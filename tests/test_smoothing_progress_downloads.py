@@ -157,7 +157,7 @@ def test_stage_messages_precede_warning_and_show_refinement(tmp_path, small_pdb,
     ("--reconsolidate-every", "-1"), ("--reconsolidate-iterations", "-1"),
     ("--refine-strength-control", "invalid"), ("--refine-selection", "invalid"),
     ("--sulfur-residue-placement", "invalid"), ("--sulfur-anchor-tolerance", "-1"), ("--sulfur-anchor-tolerance", "nan"), ("--consolidate-noncontact-slack", "invalid"),
-    ("--pair-limit-override", "S-S=nan")])
+    ("--pair-limit-override", "S-S=nan"), ("--refine-landing", "invalid")])
 def test_invalid_progress_and_refinement_fail_before_input(option, value, capsys):
     with pytest.raises(SystemExit) as stopped:
         main(["generate", "--input", "missing.pdb", "--output-prefix", "out", option, value])

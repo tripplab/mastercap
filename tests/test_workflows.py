@@ -49,6 +49,8 @@ def test_generation_and_independent_validation(tmp_path, small_pdb):
     report = json.loads(prefix.with_suffix(".json").read_text())
     assert report["geometry"]["mandatory_pass"]
     assert report["status"] == "uncalibrated"
+    assert 'held_out' in report['metrics']
+    assert 'edge_concentration' in report['diagnostics']
     assert main(["validate", "--input", str(small_pdb), "--pdb", str(prefix.with_suffix(".pdb")),
                  "--report", str(prefix.with_suffix(".json")), "--output-prefix", str(tmp_path/"validation")]) == 2
     second = tmp_path/"second"

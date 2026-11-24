@@ -8,6 +8,39 @@ from .radial import shell_volumes
 CHUNK = 2_000_000
 
 
+def edge_concentration(radial, edges, thresholds=(0.002, 0.005, 0.01)):
+    """Measure interior-edge sheets; support walls never count as edges here."""
+    radial, edges = np.asarray(radial), np.asarray(edges)
+    interior = edges[1:-1]
+    widths = np.diff(edges)
+    if not len(widths) or np.any(widths <= 0):
+        raise MastercapError('Edge concentration requires increasing bin edges')
+    if len(interior):
+        pos = np.searchsorted(interior, radial)
+        distance = np.minimum(np.abs(radial-interior[np.clip(pos, 0, len(interior)-1)]),
+                              np.abs(radial-interior[np.clip(pos-1, 0, len(interior)-1)]))
+    else:
+        distance = np.full(len(radial), np.inf)
+    counts = np.histogram(radial, edges)[0]
+    sides = np.full(len(widths), 2)
+    sides[0] -= 1
+    sides[-1] -= 1
+    fractions, expected, ratios = {}, {}, {}
+    for t in thresholds:
+        if not np.isfinite(t) or t <= 0:
+            raise MastercapError('Edge thresholds must be finite and positive')
+        key = str(t)
+        fractions[key] = float(np.mean(distance < t)) if len(radial) else 0.
+        expected[key] = float(np.sum(counts*np.minimum(1., sides*t/widths))/len(radial)) if len(radial) else 0.
+        ratios[key] = fractions[key]/expected[key] if expected[key] else None
+    bands = np.linspace(0, 0.5*np.median(widths), 11)
+    histogram = np.histogram(distance, bands)[0]
+    return {'fraction_within': fractions, 'expected_within': expected, 'ratio_within': ratios,
+            'band_histogram': {'edges_angstrom': bands.tolist(),
+                               'fractions': (histogram/max(1, len(radial))).tolist(),
+                               'fraction_outside_bands': float(np.count_nonzero(distance > bands[-1])/max(1, len(radial)))}}
+
+
 def mesh_sizes(value):
     try:
         values = [float(x) for x in (value.split(',') if isinstance(value,str) else value)]
@@ -168,5 +201,6 @@ def particle_diagnostics(structure, center, edges, target, step_block=None,
             'residue_drift':{'median_angstrom':float(np.median(drift)) if drift else None,
                              'p95_angstrom':float(np.percentile(drift,95)) if drift else None},
             'walls':walls,'layering':layering}
+    result['edge_concentration'] = edge_concentration(radial, edges)
     if reference_summary is not None:result['reference']=reference_summary
     return result
