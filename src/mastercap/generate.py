@@ -17,6 +17,8 @@ from .refinement import (PushController, apply_radial_push, candidate_key, error
                          slack_summary, consolidation_targets, AcceptanceController,
                          accept_trial, force_summary, crossing_metrics, classify_stall, apply_crossing_push, resolve_drift_step, effective_patience, resolve_landing_depth)
 from .refinement import errors_at_push, radial_bins, restore_anchor_bins
+from .refinement import finish_wall_residues
+from .repair import rigid_fit, RepairRecovery
 
 
 def residue_groups(structure):
@@ -492,7 +494,9 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
            sulfur_anchor_tolerance=1.5, sulfur_anchor_spring=True, target_model="reference", original_profiles=None, wall_clamp="band", step_edge_width=None,
            refine_drift_step="auto", refine_transport_factor=2.0, bin_width=None, refine_transport_routing="cumulative",
            refine_landing="random", refine_landing_depth="auto", held_out=None,
-           refine_bin_dither=1, refine_wall_selection="edge-first", target_definition=None):
+           refine_bin_dither=1, refine_wall_selection="edge-first", target_definition=None,
+           repair_residue_reset="on", repair_stuck_iterations=50, repair_reset_limit=5,
+           refine_wall_residue_step=0.5):
     if target_model not in ("reference", "step"):
         raise MastercapError("Target model must be reference or step")
     if target_model == "step" and sulfur_residue_placement == "reference":
@@ -534,10 +538,12 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     landing_depth = (resolve_landing_depth(refine_landing_depth, bin_width)
                      if (refine_selection == 'crossing' and refine_landing == 'random') or refine_landing_depth != 'auto'
                      else 0.002 if refine_landing == 'legacy' else None)
-    if refine_wall_selection not in ('edge-first','wall-first'):
-        raise MastercapError('Refine wall selection must be edge-first or wall-first')
-    if refine_wall_selection == 'wall-first' and (refine_selection != 'crossing' or refine_drift_step == 'legacy'):
-        raise MastercapError('Wall-first selection requires crossing selection and an auto or numeric refine drift step')
+    if refine_wall_selection not in ('edge-first','wall-first','wall-residue'):
+        raise MastercapError('Refine wall selection must be edge-first, wall-first or wall-residue')
+    if refine_wall_selection != 'edge-first' and (refine_selection != 'crossing' or refine_drift_step == 'legacy'):
+        raise MastercapError('Wall selection requires crossing selection and an auto or numeric refine drift step')
+    if not np.isfinite(refine_wall_residue_step) or not .02 <= refine_wall_residue_step <= 1.:
+        raise MastercapError('Wall residue step must be in [0.02, 1.0] A')
     definition = target_definition if target_definition is not None else Target(edges, profiles, None)
     if target_definition is None and target_model == 'step' and (held_out is None or refine_bin_dither != 1):
         if step_edge_width is None:
@@ -562,6 +568,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                                       inter_residue_limits=getattr(analysis,'inter_residue',None),
                                       inter_residue_scale=getattr(analysis,'inter_scale',1.),
                                       overridden_pairs=[r['pair'] for r in getattr(analysis,'distance_limit_overrides',[])])
+    recovery = RepairRecovery(metadata,repair_residue_reset,repair_stuck_iterations,repair_reset_limit)
+    pending_wall = None
     def measure_slack(local):
         return slack_summary(local, metadata, margin, mode, slack=refine_slack)
 
@@ -650,9 +658,17 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         summary = error_summary(metrics)
         if (first_feasible is None or phase == 'repair') and (iteration % progress_interval == 0 or geometry['mandatory_pass']):
             _, outside_interval = anchors.spring(candidate.xyz, center, edges, sulfur_anchor_tolerance)
-            repair_history.append(repair_diagnostics(candidate, local, metadata, anchors, iteration, outside_interval))
+            repair_history.append(repair_diagnostics(candidate, local, metadata, anchors, iteration, outside_interval,
+                                                      recovery.report['total_resets']))
         rolled_back = controller.observe(iteration, geometry, structure.xyz,
                                          candidate_key(metrics, selection_objective), summary)
+        if pending_wall is not None and controller.pending is None:
+            record,ids,sides,snapshot = pending_wall
+            finish_wall_residues(record,ids,sides,metadata.groups,snapshot,structure.xyz)
+            if record.get('rollback'):
+                record['wall_residue']['accepted_residues']=record['wall_residue']['accepted_atoms']=0
+                for side in ('inner','outer'):record['wall_residue'][side]['accepted_residues']=0
+            pending_wall = None
         if rolled_back and stage_progress:
             record = push_history[-1]
             stage_progress(f"Rollback push from iteration {record['iteration']} at iteration {iteration}: "
@@ -855,6 +871,13 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         clamp_events=int(np.count_nonzero(clipped!=radial))
         pieces["radial_clip"][:] = (clipped-radial)[:, None]*direction*0.8
         pieces["centering"][:] = (center-structure.xyz.mean(axis=0))*0.1
+        if repair_residue_reset == 'on' and phase == 'repair' and first_feasible is None:
+            reset_mask = recovery.apply(iteration,structure,local,getattr(analysis,'structure',None),center,edges,rng,anchors.indices,stage_progress)
+            if reset_mask.any():
+                for piece in pieces.values():piece[reset_mask] = 0
+                clamp_events -= int(np.count_nonzero((clipped != radial) & reset_mask))
+                if repair_history and repair_history[-1]['iteration'] == iteration:
+                    repair_history[-1]['resets_so_far'] = recovery.report['total_resets']
         force = sum(pieces.values())
         before_push = None
         # Soft radial transport; rank by current radius for each element.
@@ -875,17 +898,29 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                                                        drift_step="legacy" if drift_step is None else drift_step, transport_factor=refine_transport_factor,routing=refine_transport_routing,
                                                        rng=rng, landing_mode=refine_landing, landing_depth=refine_landing_depth, bin_width=bin_width,
                                                        anchor_edges=edges if refine_bin_dither > 1 else None,
-                                                       wall_selection=refine_wall_selection)
+                                                       wall_selection=refine_wall_selection,residues=metadata.residues,
+                                                       groups=metadata.groups,wall_residue_step=refine_wall_residue_step)
             else:
                 details, selected = apply_radial_push(push_force, push_radial, push_direction, metadata.element_indices, partition_quantiles[partition_index],
                                                       controller.strength, refine_max_step, refine_fraction, refine_min_step)
             details['dither_fraction'] = partition.fraction
+            wall_atoms = details.pop('wall_atoms',None)
+            rigid_ids = details.pop('rigid_residues',None)
+            rigid_sides = details.pop('rigid_residue_walls',{})
+            rigid_atoms = np.zeros(len(structure.atoms),bool)
+            if rigid_ids is not None:
+                rigid_atoms = np.isin(metadata.residues,rigid_ids)
             scaled = neighbor_forces == "scaled"
             neighbor_details = characteristic_forces(
                 pieces["nearest_neighbor"], push_source, analysis, metadata, mode=neighbor_forces, margin=margin, guard=refine_slack,
                 strength=0.002*(controller.strength/refine_strength) if scaled else 0.002,
                 max_move=refine_max_step/2 if scaled else None,
                 selected_indices=selected if scaled else None)
+            if rigid_atoms.any():
+                for name,piece in pieces.items():
+                    if name != 'radial_push':piece[rigid_atoms] = 0
+                force[rigid_atoms] = 0
+                neighbor_details['rigid_residue_atoms_excluded'] = int(rigid_atoms.sum())
             details["neighbor_forces"] = neighbor_details
             details["profile_before"] = summary
             details["force_components"] = {name: force_summary(values) for name, values in pieces.items()}
@@ -896,15 +931,18 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             random_crossing = refine_landing == 'random' and refine_selection == 'crossing'
             # Do not truncate the new landing distribution at the repair cap.
             move_cap = max(0.2, requested_reach) if random_crossing else 0.2
+            if refine_wall_selection == 'wall-residue':move_cap=max(move_cap,refine_wall_residue_step)
             if refine_acceptance == "per-atom":
                 trial = Structure(structure.atoms, candidate.xyz.copy())
                 update_positions(trial, push_force, groups, mode, max_move=move_cap)
-                full_envelope = random_crossing or refine_bin_dither > 1 or refine_wall_selection == 'wall-first'
+                full_envelope = random_crossing or refine_bin_dither > 1 or refine_wall_selection != 'edge-first'
                 trial_reach = max(requested_reach, float(np.linalg.norm(trial.xyz-candidate.xyz, axis=1).max())) if full_envelope else refine_max_step
                 accepted, checked, previous_undone = accept_trial(candidate.xyz, trial.xyz, local, metadata, center, edges,
                                                                  margin, mode, trial_reach, selected_indices=selected,
                                                                  return_undone=True, anchor_bins=anchor_bins,
-                                                                 backtrack=drift_step is not None and refine_selection=="crossing")
+                                                                 backtrack=drift_step is not None and refine_selection=="crossing",
+                                                                 rigid_residues=rigid_ids,wall_atoms=wall_atoms)
+                finish_wall_residues(details,rigid_ids,rigid_sides,metadata.groups,candidate.xyz,accepted)
                 for e, values in checked.pop("per_element").items():
                     details["per_element"].setdefault(e, {}).update(values)
                 crossings = crossing_metrics(push_radial, np.linalg.norm(accepted-center, axis=1),
@@ -921,11 +959,15 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                 details['mean_actual_move_per_proposal_angstrom']=float(movement.sum()/details['atoms_proposed']) if details['atoms_proposed'] else 0.
                 details['mean_actual_move_of_movers_angstrom']=float(movement[movement>0].mean()) if np.any(movement>0) else 0.
                 controller.start(iteration, candidate.xyz, details, candidate_key(metrics, selection_objective))
+                if rigid_ids is not None:
+                    pending_wall=(push_history[-1],rigid_ids,rigid_sides,controller.pending[1])
                 structure.xyz[:] = accepted
             else:
                 force += push_force
                 before_push = structure.xyz.copy()
                 controller.start(iteration, structure.xyz, details, candidate_key(metrics, selection_objective))
+                if rigid_ids is not None:
+                    pending_wall=(push_history[-1],rigid_ids,rigid_sides,controller.pending[1])
             profile_updates += 1
             if refine_acceptance == "per-atom":
                 del local, force, push_force, pieces
@@ -939,9 +981,18 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                 rejected = restore_anchor_bins(structure.xyz,before_push,center,edges,anchor_bins,
                                                metadata.residues if mode == 'residue' else None)
                 push_history[-1].setdefault('undone_by_reason',{})['anchor_bin'] = rejected
+            if rigid_ids is not None:
+                for r in rigid_ids:
+                    group=metadata.groups[int(r)];delta=structure.xyz[group]-before_push[group]
+                    if not np.allclose(delta,delta[0],rtol=0,atol=1e-9):structure.xyz[group]=before_push[group]
+                finish_wall_residues(push_history[-1],rigid_ids,rigid_sides,metadata.groups,before_push,structure.xyz)
             push_history[-1]["actual_move"] = force_summary(structure.xyz-before_push)
         del local, force, pieces
     controller.finish()
+    if pending_wall is not None:
+        block=pending_wall[0]['wall_residue']
+        block['accepted_residues']=block['accepted_atoms']=0
+        for side in ('inner','outer'):block[side]['accepted_residues']=0
     if consolidation_episode is not None and consolidation_episode["end_iteration"] is None:
         consolidation_episode.update(end_iteration=iteration, reason="search_stopped",
                                      after=measure_slack(local))
@@ -966,6 +1017,12 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     report.update({"feasible_iterations": feasible_iterations, "push_history": push_history,
                    "best_history": best_history, "initial_metrics": initial_metrics})
     report['repair_history'] = repair_history
+    report['repair_resets'] = recovery.report
+    for name in ('undone_too_close_by_relation','wall_undone_too_close_by_relation'):
+        report[name] = {relation:sum(p.get(name,{}).get(relation,0) for p in push_history)
+                        for relation in ('same_residue','other_residue')}
+    report['wall_residue_proposed_residues'] = sum(p.get('wall_residue',{}).get('proposed_residues',0) for p in push_history)
+    report['wall_residue_accepted_residues'] = sum(p.get('wall_residue',{}).get('accepted_residues',0) for p in push_history)
     report['errors_at_push'] = errors_at_push(best_history,push_history)
     if termination == 'time_limit':
         logging.getLogger(__name__).warning('Search ended by time limit after %d of %d pushes; results depend on machine speed and are not reproducible by seed',profile_updates,refine_updates)
@@ -997,6 +1054,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                        "landing_mode":refine_landing, "landing_depth":landing_depth,
                        "bin_dither":refine_bin_dither, "dither_fractions":[p.fraction for p in partitions],
                        "wall_selection":refine_wall_selection,
+                       "wall_residue_step":refine_wall_residue_step, "repair_residue_reset":repair_residue_reset,
+                       "repair_stuck_iterations":repair_stuck_iterations,"repair_reset_limit":repair_reset_limit,
                        "effective_drift_step_angstrom":drift_step, "transport_factor":refine_transport_factor, "transport_routing":("local" if drift_step is None else refine_transport_routing) if refine_selection=="crossing" else "not_applicable", "improvement_relative": improvement_relative,
                        "starting_strength": refine_strength, "minimum_strength": controller.minimum,
                        "maximum_strength": controller.maximum, "fraction": refine_fraction,
@@ -1043,17 +1102,14 @@ def residue_transforms(structure, reference):
     for group in residue_groups(structure):
         source = np.array([reference.xyz[structure.atoms[i].origin["reference_atom_index"]] for i in group])
         target = structure.xyz[group]
-        a, b = source.mean(axis=0), target.mean(axis=0)
-        u, _, vt = np.linalg.svd((source-a).T@(target-b))
-        rotation = u@np.diag([1, 1, np.linalg.det(u@vt)])@vt
-        fitted = (source-a)@rotation+b
+        _,rotation,translation,rmsd = rigid_fit(source,target)
         result.append({"residue": structure.atoms[group[0]].residue,
-                       "rotation_row_vector": rotation.tolist(), "translation": (b-a@rotation).tolist(),
-                       "rigid_fit_rmsd_angstrom": float(np.sqrt(np.mean(np.sum((target-fitted)**2, axis=1))))})
+                       "rotation_row_vector": rotation.tolist(), "translation": translation.tolist(),
+                       "rigid_fit_rmsd_angstrom": rmsd})
     return result
 
 
-def repair_diagnostics(structure, local, metadata, anchors, iteration, outside_interval):
+def repair_diagnostics(structure, local, metadata, anchors, iteration, outside_interval, resets_so_far=0):
     disconnected = local['disconnected_residues']
     names = Counter(structure.atoms[metadata.groups[r][0]].resname for r in disconnected)
     anchored_residues = set(metadata.residues[anchors.indices].tolist())
@@ -1061,7 +1117,7 @@ def repair_diagnostics(structure, local, metadata, anchors, iteration, outside_i
     pairs = Counter('-'.join(sorted(metadata.elements[pair])) for pair in violating)
     involved = np.isin(violating, anchors.indices).any(axis=1) if len(violating) else np.array([],bool)
     top = lambda counts: dict(sorted(counts.items(),key=lambda item:(-item[1],item[0]))[:5])
-    return {'iteration':iteration,'disconnected_residues':len(disconnected),
+    return {'iteration':iteration,'resets_so_far':resets_so_far,'disconnected_residues':len(disconnected),
             'disconnected_by_residue_name':top(names),
             'anchored_disconnected_residues':sum(r in anchored_residues for r in disconnected),
             'distance_violations':len(violating),'distance_violations_by_pair':top(pairs),

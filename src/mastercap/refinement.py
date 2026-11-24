@@ -124,7 +124,8 @@ def resolve_landing_depth(value, bin_width):
 def apply_crossing_push(force, radial, direction, element_indices, profiles, edges,
                         strength, max_step, fraction, min_step=0.002, blocked=None, anchor_bins=None, drift_step="auto", transport_factor=2.0, routing="cumulative",
                         rng=None, landing_mode="random", landing_depth="auto", bin_width=None,
-                        anchor_edges=None, wall_selection="edge-first"):
+                        anchor_edges=None, wall_selection="edge-first", residues=None, groups=None,
+                        wall_residue_step=0.5):
     """Reserve cumulative (or legacy local) edge quotas, then select near-edge drifters."""
     drift_width = bin_width if anchor_edges is not None and bin_width is not None else float(np.mean(np.diff(edges)))
     drift_step = resolve_drift_step(drift_step, drift_width, min_step, max_step)
@@ -135,10 +136,14 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
     if landing_mode not in ('random', 'legacy'):
         raise MastercapError('Refine landing mode must be random or legacy')
     width = float(np.max(np.diff(edges))) if bin_width is None else bin_width
-    if wall_selection not in ('edge-first','wall-first'):
-        raise MastercapError('Refine wall selection must be edge-first or wall-first')
-    if wall_selection == 'wall-first' and drift_step is None:
-        raise MastercapError('Wall-first selection requires an auto or numeric refine drift step')
+    if wall_selection not in ('edge-first','wall-first','wall-residue'):
+        raise MastercapError('Refine wall selection must be edge-first, wall-first or wall-residue')
+    if wall_selection != 'edge-first' and drift_step is None:
+        raise MastercapError('Wall selection requires an auto or numeric refine drift step')
+    if wall_selection == 'wall-residue' and (residues is None or groups is None):
+        raise MastercapError('Wall-residue selection requires residue ids and groups')
+    if not np.isfinite(wall_residue_step) or not .02 <= wall_residue_step <= 1.:
+        raise MastercapError('Wall residue step must be in [0.02, 1.0] A')
     depth = resolve_landing_depth(landing_depth, width) if landing_mode == 'random' or landing_depth != 'auto' else 0.002
     if landing_mode == 'random' and rng is None:
         raise MastercapError('Random refinement landing requires the search RNG')
@@ -156,9 +161,59 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
     selected, absolute, per_element = [], [], {}
     all_drift_distances=[]
     landing_values=[]
+    wall_atom_indices=[]
+    rigid_moves={}
+    rigid_counts={e:0 for e in element_indices}
+    rigid_crossings={e:0 for e in element_indices}
+    if wall_selection == 'wall-residue' and len(edges) > 2:
+        proposals={}
+        element_for_atom=np.empty(len(radial),dtype=object)
+        for element,indices in element_indices.items():element_for_atom[indices]=element
+        for e,indices in (sorted(element_indices.items()) if landing_mode == 'random' else element_indices.items()):
+            balance=inventory[e][2]
+            for source,destination,edge,sign,wall,side in ((0,1,1,1,edges[0],'inner'),
+                    (len(edges)-2,len(edges)-3,len(edges)-2,-1,edges[-1],'outer')):
+                quota=quota_for(balance,edge,source,destination,sign)
+                if balance[source] <= 0 or quota <= 0:continue
+                count=min(int(np.ceil(transport_factor*quota)),int(np.floor(fraction*len(indices))))
+                candidates=indices[(bins[indices] == source) & ~blocked[indices] & ~used[indices]]
+                take=candidates[np.argsort(np.abs(radial[candidates]-wall),kind='stable')[:count]]
+                for atom in take:
+                    residue=int(residues[atom]);group=groups[residue]
+                    if np.any(used[group] | blocked[group]):continue
+                    cap=min(depth,.5*np.diff(edges)[destination])
+                    if landing_mode == 'random':
+                        if cap < .002:raise MastercapError('Destination bin is too narrow for landing')
+                        u=.002+rng.random()*(cap-.002)
+                    else:u=.002
+                    magnitude=min(abs(radial[atom]-edges[edge])+u,wall_residue_step)
+                    if residue not in proposals or magnitude > proposals[residue][0]:
+                        proposals[residue]=(magnitude,sign*magnitude*direction[atom],side)
+        support=edges if anchor_edges is None else anchor_edges
+        offsets=radial[:,None]*direction
+        for residue,(magnitude,translation,side) in proposals.items():
+            group=groups[residue]
+            if np.any(used[group] | blocked[group]):continue
+            after=np.linalg.norm(offsets[group]+translation,axis=1)
+            if np.any((after < support[0]) | (after > support[-1])):continue
+            anchored=anchor_target[group] >= 0
+            if np.any(radial_bins(after,support)[anchored] != anchor_target[group][anchored]):continue
+            force[group] += translation
+            used[group]=True;rigid_moves[residue]=side
+            selected.append(np.asarray(group));absolute.append(np.abs(after-radial[group]))
+            wall_atom_indices.extend(group.tolist())
+            old,new=bins[group],radial_bins(after,edges)
+            for e,indices in element_indices.items():
+                mask=element_for_atom[group] == e
+                if not mask.any():continue
+                counts,_,balance=inventory[e]
+                delta=np.bincount(new[mask],minlength=len(balance))-np.bincount(old[mask],minlength=len(balance))
+                counts += delta;balance += delta
+                rigid_counts[e] += int(mask.sum())
+                rigid_crossings[e] += int(np.count_nonzero(new[mask] != old[mask]))
     for e, indices in (sorted(element_indices.items()) if landing_mode == 'random' else element_indices.items()):
         _, _, balance = inventory[e]
-        capacity = int(np.floor(fraction*len(indices)))
+        capacity = max(0,int(np.floor(fraction*len(indices)))-rigid_counts[e])
         chosen, requested, crossing_flags, wall_flags = [], [], [], []
         crossing_count = 0
         if wall_selection == 'wall-first' and len(edges) > 2:
@@ -262,18 +317,19 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
         anchor_rejected = int(bad_anchor.sum())
         crossing_count -= int((bad_anchor & crossing_flags).sum())
         chosen, requested = chosen[~bad_anchor], requested[~bad_anchor]
+        wall_atom_indices.extend(np.asarray(chosen)[wall_flags[~bad_anchor]].tolist())
         landing_values.extend(offsets[~bad_anchor & np.isfinite(offsets)].tolist())
         force[chosen] += requested[:, None]*direction[chosen]
         selected.append(chosen)
         absolute.append(np.abs(requested))
-        per_element[e] = {"selected": len(chosen), "crossing_proposals": crossing_count,
-                          "drift_proposals": len(chosen)-crossing_count,
+        per_element[e] = {"selected": len(chosen)+rigid_counts[e], "crossing_proposals": crossing_count+rigid_crossings[e],
+                          "drift_proposals": len(chosen)-crossing_count+rigid_counts[e]-rigid_crossings[e],
                           "anchor_bin_selection_rejections": anchor_rejected}
         per_element[e].update(wall_first_proposals=int((wall_flags & ~bad_anchor).sum()),
                               wall_first_crossings=int((wall_flags & crossing_flags & ~bad_anchor).sum()))
     moves = np.concatenate(absolute) if absolute else np.array([])
     chosen = np.concatenate(selected) if selected else np.array([], dtype=int)
-    return {"strength": float(strength), "selected_atoms": len(chosen),
+    details = {"strength": float(strength), "selected_atoms": len(chosen),
             "atoms_pushed": int(np.count_nonzero(moves)),
             "mean_requested_radial_move_angstrom": float(moves.mean()) if len(moves) else 0.0,
             "max_requested_radial_move_angstrom": float(moves.max()) if len(moves) else 0.0,
@@ -283,7 +339,31 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
             "crossing_proposals":sum(p['crossing_proposals'] for p in per_element.values()),
             "landing": {"mode": landing_mode, "depth_max": float(depth),
                         "crossing_moves": len(landing_values),
-                        "mean_landing_depth": float(np.mean(landing_values)) if landing_values else None}}, chosen
+                        "mean_landing_depth": float(np.mean(landing_values)) if landing_values else None},
+            "wall_atoms":np.asarray(wall_atom_indices,dtype=int)}
+    if wall_selection == 'wall-residue':
+        rigid_ids=np.asarray(list(rigid_moves),dtype=int)
+        magnitudes=[np.linalg.norm(force[groups[r]][0]) for r in rigid_ids]
+        details.update(rigid_residues=rigid_ids,rigid_residue_walls=rigid_moves,
+            wall_residue={'proposed_residues':len(rigid_ids),'proposed_atoms':len(wall_atom_indices),
+                'accepted_residues':0,'accepted_atoms':0,
+                'mean_translation_angstrom':float(np.mean(magnitudes)) if magnitudes else 0.,
+                **{side:{'proposed_residues':sum(v == side for v in rigid_moves.values()),'accepted_residues':0}
+                   for side in ('inner','outer')}})
+    return details,chosen
+
+
+def finish_wall_residues(details, rigid_residues, sides, groups, snapshot, accepted):
+    if 'wall_residue' not in details:return
+    block=details['wall_residue']
+    block['accepted_residues']=block['accepted_atoms']=0
+    for side in ('inner','outer'):block[side]['accepted_residues']=0
+    for residue in rigid_residues:
+        group=groups[int(residue)]
+        delta=accepted[group]-snapshot[group]
+        if np.all(np.linalg.norm(delta,axis=1) > 0) and np.allclose(delta,delta[0],rtol=0,atol=1e-9):
+            block['accepted_residues'] += 1;block['accepted_atoms'] += len(group)
+            block[sides[int(residue)]]['accepted_residues'] += 1
 
 
 def damage_summary(iteration, geometry):
@@ -392,7 +472,7 @@ def classify_stall(history, patience):
 
 def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
                  mode="independent", max_step=0.05, selected_indices=None, return_undone=False,
-                 anchor_bins=None, backtrack=False):
+                 anchor_bins=None, backtrack=False, rigid_residues=None, wall_atoms=None):
     """Reject conflicting moved atoms/residues while retaining every old contact.
 
     Candidate pairs cover trial/trial AND trial/snapshot combinations, since
@@ -400,7 +480,20 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
     needed: preserving the snapshot edges preserves both connectivity graphs.
     """
     backtrack=bool(backtrack and mode=='independent')
+    rigid_groups = [] if rigid_residues is None else [metadata.groups[int(r)] for r in np.unique(rigid_residues)]
+    # Quantize a single translation, rather than rounding group atoms separately.
+    translations = [np.round(np.mean(trial[g]-snapshot[g],axis=0),3) for g in rigid_groups]
     trial = np.round(trial, 3)
+    for group, shift in zip(rigid_groups,translations):
+        trial[group] = snapshot[group]+shift
+    rigid_atoms = np.zeros(len(snapshot),bool)
+    for group in rigid_groups:rigid_atoms[group] = True
+
+    def expand_rigid(reject, moving):
+        if rigid_groups and np.any(reject & rigid_atoms):
+            hit = np.unique(metadata.residues[reject & rigid_atoms])
+            reject |= np.isin(metadata.residues,hit) & moving
+        return reject
     proposed = np.any(trial != snapshot, axis=1)
     proposals = proposed.copy()
     if selected_indices is not None:
@@ -440,14 +533,23 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
                     collect(source, (bi, positions[bi]), bound)
     pairs = np.unique(np.vstack(blocks), axis=0)
     contacts = local["overlap_edges"]
+    if rigid_groups and len(contacts):
+        internal_rigid = ((metadata.residues[contacts[:,0]] == metadata.residues[contacts[:,1]])
+                          & rigid_atoms[contacts[:,0]])
+        contacts = contacts[~internal_rigid]
     lower = metadata.pair_lower_bounds(pairs)
     upper = metadata.radii[contacts].sum(axis=1)-margin-0.003
     eligible = np.ones(len(pairs), dtype=bool)
     if mode == "residue":
         eligible &= metadata.residues[pairs[:, 0]] != metadata.residues[pairs[:, 1]]
+    if rigid_groups:
+        # Exact translations preserve snapshot internal floors and contacts;
+        # only new external interactions need the conservative safety guard.
+        eligible &= ~((metadata.residues[pairs[:,0]] == metadata.residues[pairs[:,1]]) & rigid_atoms[pairs[:,0]])
     reasons = {name: np.zeros(len(snapshot), dtype=bool)
                for name in ("too_close", "contact_broken", "out_of_bounds", "anchor_bin")}
     pair_rejections = {}
+    relation_rejections = {'same_residue':set(), 'other_residue':set()}
 
     def offenders():
         moving = np.any(trial != snapshot, axis=1)
@@ -456,6 +558,10 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
         bad = eligible & moving[pairs].any(axis=1) & (distance < lower+0.003)
         offending_pairs = pairs[bad]
         if len(offending_pairs):
+            same = metadata.residues[offending_pairs[:,0]] == metadata.residues[offending_pairs[:,1]]
+            for name, mask in (('same_residue',same),('other_residue',~same)):
+                affected = np.unique(offending_pairs[mask])
+                relation_rejections[name].update(affected[moving[affected]].tolist())
             types = np.sort(metadata.codes[offending_pairs], axis=1)
             for kind in np.unique(types, axis=0):
                 affected = np.unique(offending_pairs[np.all(types == kind, axis=1)])
@@ -488,7 +594,7 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
         reject &= moving
         if mode == "residue" and reject.any():
             reject = np.isin(metadata.residues, np.unique(metadata.residues[reject])) & moving
-        return reject
+        return expand_rigid(reject,moving)
 
     backtracked=np.zeros(len(snapshot),dtype=bool)
     backtracking_rounds=0
@@ -500,7 +606,10 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
         if backtrack and passes<=4:
             backtracked |= reject
             backtracking_rounds+=1
+            shifts = [(g,np.round(np.mean(trial[g]-snapshot[g],axis=0)/2,3))
+                      for g in rigid_groups if np.any(reject[g])]
             trial[reject]=np.round((trial[reject]+snapshot[reject])/2,3)
+            for group,shift in shifts:trial[group] = snapshot[group]+shift
         else:
             trial[reject] = snapshot[reject]
     reject = offenders()
@@ -510,6 +619,7 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
         reject[adjacent] = True
         if mode == "residue":
             reject = np.isin(metadata.residues, np.unique(metadata.residues[reject]))
+        reject = expand_rigid(reject,np.any(trial != snapshot,axis=1))
         expanded = int(np.count_nonzero(reject & np.any(trial != snapshot, axis=1)))
         trial[reject] = snapshot[reject]
     safety_reverted_all = bool(offenders().any())
@@ -526,6 +636,7 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
     if backtrack:
         reasons={name:mask & undone for name,mask in reasons.items()}
         pair_rejections={pair:{i for i in indices if undone[i]} for pair,indices in pair_rejections.items()}
+        relation_rejections={name:{i for i in indices if undone[i]} for name,indices in relation_rejections.items()}
     per_element = {e: {"accepted": int(retained[ix].sum()), "undone": int(undone[ix].sum()),
                        "undone_too_close": int(reasons["too_close"][ix].sum()),
                        "undone_contact_broken": int(reasons["contact_broken"][ix].sum())}
@@ -535,12 +646,19 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
         per_element[e]["undone_too_close_by_pair"] = {
             name: element_count for name, indices in sorted(pair_rejections.items())
             if (element_count := int(np.count_nonzero(metadata.elements[np.fromiter(indices, dtype=int)] == e)))}
+        per_element[e]['undone_too_close_by_relation'] = {
+            name:int(sum(metadata.elements[i] == e for i in indices)) for name,indices in relation_rejections.items()}
+    wall_mask = np.zeros(len(snapshot),bool)
+    if wall_atoms is not None:wall_mask[np.asarray(wall_atoms,dtype=int)] = True
     details = {"atoms_proposed": proposal_count, "atoms_accepted": int(retained.sum()),
                    "atoms_undone": int(proposal_count-retained.sum()), "atoms_moved": int(accepted.sum()),
                    "proposed_moving_atoms": int(proposed.sum()),
                    "stationary_proposals": int(np.count_nonzero(proposals & ~proposed)),
                    "undone_by_reason": {name: int(mask.sum()) for name, mask in reasons.items()},
                    "undone_too_close_by_pair": by_pair,
+                   "undone_too_close_by_relation": {name:len(indices) for name,indices in relation_rejections.items()},
+                   "wall_undone_by_reason": {name:int((mask & wall_mask & undone).sum()) for name,mask in reasons.items()},
+                   "wall_undone_too_close_by_relation": {name:int(sum(wall_mask[i] for i in indices)) for name,indices in relation_rejections.items()},
                    "acceptance_fraction": float(retained.sum()/proposal_count) if proposal_count else 1.0,
                    "check_passes": passes, "expanded_undo_atoms": expanded,
                    "safety_reverted_all": safety_reverted_all, "center_rejected": center_rejected,

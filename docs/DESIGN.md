@@ -574,3 +574,60 @@ count ratio; slopes are unweighted least-squares density-versus-radius slopes.
 Zero counts and numerically flat expected slopes produce null ratios. Reference
 diagnostics without an imposed target have contact_zone=null. These diagnostics
 do not affect ranking or status and do not reproduce a particular voxel mesher.
+
+## Revision 10: bounded recovery and mixed rigid wall proposals
+
+RepairRecovery owns vectorized integer arrays for disconnection/clash streaks
+and successful reset counts, indexed by synthetic residue id. It runs only in
+phase=repair before first feasibility. Off bypasses it; on with no threshold
+reached changes neither positions, forces nor RNG draws. Templates are accessed
+lazily when an event fires. rigid_fit factors the old residue_transforms Kabsch
+math into one helper with identical row-vector reporting conventions.
+
+Disconnected residues receive fitted reference templates. Persistent-clash
+pairs prefer the non-anchored residue, then smaller size/higher-id tie break.
+The unjam translation has length 0.5 Å in the centroid tangent plane and one
+seeded azimuth. Restore anchor radius, then find the smallest centroid-radial
+support shift with 0.01 Å spare. If both support and anchor requirements cannot
+be met, skip without modifying coordinates or consuming RNG state. All force
+pieces are zeroed on successful resets before update_positions. Other atoms
+receive their original computed forces; the next iteration rebuilds geometry.
+
+Longest streaks run first. Per-residue and per-iteration limits bound successful
+resets; skipped support keeps counting. Reports cap event detail at 200 but keep
+totals, skipped attempts and exhausted ids. Repair history records cumulative
+resets. The recovery does not claim success or relax any geometry audit, and
+does not bypass time/iteration limits. It is disabled after first feasibility.
+
+wall-residue uses the current transport partition for seed selection and
+multi-element balance updates, but generation edges for support and anchors.
+Collect per-element nearest-wall seeds, retain the largest translation for
+each residue in first-selection order, and reserve all its atoms. Coordinates
+relative to the center are recovered from radial*direction to check endpoints.
+Balances of all elements are updated before normal loops; expanded partner
+counts consume remaining normal selection capacity. Whole-group expansion
+prioritizes residue integrity over the soft seed-atom fraction budget.
+
+Rigid proposals exclude every other force piece. Their capped uniform
+translation survives update_positions; acceptance queries cover requested and
+projected displacement. accept_trial expands reject masks for selected rigid
+residues, including expanded undo, and quantizes/halves a single group translation
+rather than rounding atoms independently. Snapshot internal distances/contacts
+are unchanged and do not need an extra internal safety offset; external floors,
+contacts, walls, anchors and center guards remain enforced. None retains the
+previous acceptance path. In rollback mode, broken anchor restoration reverts
+the complete rigid group; accepted counters require a uniform retained move and
+are cleared on rollback or unverified stop. Transient group/atom indices remain
+private to search; report blocks contain scalar proposal/acceptance summaries.
+
+Too-close counters additionally keep sets of affected moving atoms by residue
+relation. Final backtracking filters intersect with undone atoms, as pair-based
+counters already do. Wall-origin counters intersect those sets/reason masks with
+the selector's wall atoms. A moving atom implicated in both relations counts in
+both. These fields aggregate over pushes without changing acceptance.
+
+Version 0.1.15 enables bounded repair recovery by default; wall selection stays
+edge-first and bin dithering stays 1. The unit suite includes small template,
+wall, anchor, streak/cap/RNG, multi-element inventory, mixed rigid acceptance,
+rounding and diagnostic fixtures, plus a tiny CLI generation test. No benchmark
+or production particles are executed in this revision.

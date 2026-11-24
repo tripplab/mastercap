@@ -33,6 +33,12 @@ from .reports import encode_json, preflight, publish, profile_csv, profile_png, 
 LOG = logging.getLogger("mastercap")
 
 
+class WallResidueStepAction(argparse.Action):
+    def __call__(self,parser,namespace,value,option_string=None):
+        setattr(namespace,self.dest,value)
+        namespace.wall_residue_step_explicit = True
+
+
 def log_profile_errors(metrics):
     held = metrics.get('held_out')
     if held:
@@ -439,7 +445,22 @@ PROFILE ERROR MEASURES:
   each wall, exact-target error, 0.5 A excess and density slope ratios. The
   4 A ramp scale and wall excess also affect vdW-sphere meshes; this is not
   a mesher-equivalent voxel calculation. Diagnostics never change status.
-  Opt-in example: --refine-bin-dither 4 --refine-wall-selection wall-first
+  Wall-residue moves whole residues away from surplus walls, up to
+  --refine-wall-residue-step (default 0.5 A), excluding other atom-wise forces.
+  Whole-residue acceptance/backtracking preserves each translation's geometry.
+  Opt-in example: --refine-bin-dither 4 --refine-wall-selection wall-residue
+
+REPAIR RECOVERY:
+  Before first feasible geometry only, --repair-residue-reset on (default)
+  watches consecutive disconnections/clashes. At --repair-stuck-iterations 50,
+  fit a residue template back onto it, or unjam persistent clashes with a
+  seeded 0.5 A tangential translation. Preserve anchor radius and fit inside
+  support; skip incompatible templates. At most --repair-reset-limit 5 resets
+  per residue, and max(1,floor(0.001*residue count)) successful resets/iteration.
+  No extra RNG draws or position changes occur before a reset fires. Off
+  retains v0.1.14 repair. Events are capped at 200 with totals kept separately.
+  Undo reports distinguish same-residue and other-residue too-close pairs,
+  and separately report wall-origin undos. An atom may count in both sets.
 
 FEM-ORIENTED DIAGNOSTICS:
   Reports compare particle and reference sphere overlaps, near gaps, non-bonded
@@ -455,7 +476,8 @@ FEM-ORIENTED DIAGNOSTICS:
   cumulative imbalance routes through intervening bins. Independent conflicting
   trials can take checked half-steps before rejection, without weakening guards.
   patience allows transit time (0 still disables patience). Use wall-clamp legacy
-  and refine-drift-step legacy together with refine-landing legacy to reproduce
+  and refine-drift-step legacy together with refine-landing legacy and
+  repair-residue-reset off to reproduce
   v0.1.11 search behavior (existing geometry and push fields; new diagnostics added).
   Optional inter-residue-limits reference adds scaled non-bonded reference floors
   between residues; intra-residue bounds are unchanged and pair overrides win.
@@ -513,6 +535,18 @@ def positive_integer(value):
     number = int(value)
     if number < 1:
         raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
+def repair_stuck_count(value):
+    number = positive_integer(value)
+    if number < 5:raise argparse.ArgumentTypeError('must be an integer >= 5')
+    return number
+
+
+def wall_residue_step_value(value):
+    number = finite_positive(value)
+    if not .02 <= number <= 1.:raise argparse.ArgumentTypeError('must be in [0.02, 1.0] A')
     return number
 
 
@@ -616,7 +650,12 @@ def parser():
             command.add_argument('--refine-landing',choices=('random','legacy'),default='random',help='Random spreads crossings inside destination bins using the search RNG; legacy preserves distance + 0.002 and consumes no landing draws')
             command.add_argument('--refine-landing-depth',default='auto',help='Landing depth in A: auto=min(0.25*bin width,0.25 A); numeric range [0.002,half configured bin width], capped per destination at half its actual width; crossing moves may reach max step + depth (about 0.30 A at 1 A bins)')
             command.add_argument('--refine-bin-dither',type=positive_integer,default=1,help='Fixed offset partitions cycled by push; N>1 ranks by their mean profile error; N=1 retains own-bin transport/ranking; tolerances remain own-bin')
-            command.add_argument('--refine-wall-selection',choices=('edge-first','wall-first'),default='edge-first',help='Wall-first moves nearest-wall atoms out of surplus wall bins before normal transport; opt-in, requires crossing selection and auto/numeric drift')
+            command.add_argument('--refine-wall-selection',choices=('edge-first','wall-first','wall-residue'),default='edge-first',help='Wall-first moves nearest-wall atoms; wall-residue rigidly translates their entire residues; both require crossing selection and auto/numeric drift')
+            command.set_defaults(wall_residue_step_explicit=False)
+            command.add_argument('--refine-wall-residue-step',type=wall_residue_step_value,action=WallResidueStepAction,default=.5,help='Largest rigid wall-residue translation in A, range [0.02,1.0]; no effect with other wall selectors')
+            command.add_argument('--repair-residue-reset',choices=('on','off'),default='on',help='Recover stuck pre-feasible repair residues with template resets or tangential unjams; off retains v0.1.14 repair')
+            command.add_argument('--repair-stuck-iterations',type=repair_stuck_count,default=50,help='Consecutive disconnected/clashing repair iterations before recovery; integer >= 5; inactive after first feasible geometry')
+            command.add_argument('--repair-reset-limit',type=positive_integer,default=5,help='Maximum successful repair resets per residue; integer >= 1')
             command.add_argument("--refine-selection", choices=("crossing", "mismatch"), default="crossing", help="Crossing targets useful adjacent-bin crossings, then drifts surplus atoms toward edges; skips previous rejected atoms. Mismatch keeps v0.1.5 rank-matched selection")
             command.add_argument("--refine-max-step", type=finite_positive, default=0.05, help="Crossing candidate reach in A; random landing allows requested crossings up to this + landing depth; legacy/mismatch retain the original move cap; excludes other forces and rigid projection")
             command.add_argument("--refine-fraction", type=positive_fraction, default=0.2, help="Crossing/drift atom budget per element, rounding down; mismatch rounds up and prefers largest radial mismatches; must be in (0, 1]")
@@ -689,8 +728,10 @@ def resolve_target_options(args):
         resolve_drift_step(args.refine_drift_step,args.bin_width,args.refine_min_step,args.refine_max_step)
         if (args.refine_selection == 'crossing' and args.refine_landing == 'random') or args.refine_landing_depth != 'auto':
             resolve_landing_depth(args.refine_landing_depth,args.bin_width)
-        if args.refine_wall_selection == 'wall-first' and (args.refine_selection != 'crossing' or args.refine_drift_step == 'legacy'):
-            raise MastercapError('Wall-first selection requires crossing selection and an auto or numeric refine drift step')
+        if args.refine_wall_selection != 'edge-first' and (args.refine_selection != 'crossing' or args.refine_drift_step == 'legacy'):
+            raise MastercapError('Wall selection requires crossing selection and an auto or numeric refine drift step')
+        if args.wall_residue_step_explicit and args.refine_wall_selection != 'wall-residue':
+            LOG.warning('--refine-wall-residue-step has no effect without --refine-wall-selection wall-residue')
     if not args.step_profile and args.step_edge_width is not None:
         raise MastercapError('--step-edge-width requires --step-profile')
     if args.step_profile and args.smoothing_sigma is not None and args.smoothing_sigma > 0:
@@ -905,6 +946,10 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                                          held_out=held_out_target(target),
                                          refine_bin_dither=args.refine_bin_dither,refine_wall_selection=args.refine_wall_selection,
                                          target_definition=target,
+                                         repair_residue_reset=args.repair_residue_reset,
+                                         repair_stuck_iterations=args.repair_stuck_iterations,
+                                         repair_reset_limit=args.repair_reset_limit,
+                                         refine_wall_residue_step=args.refine_wall_residue_step,
                                          target_model="step" if target.step else "reference",
                                          original_profiles=target.reference_on_edges, stage_progress=LOG.info)
             except MastercapError:
