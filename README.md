@@ -1,6 +1,6 @@
 # mastercap
 
-**Current version: 0.1.14**
+**Current version: 0.1.15**
 
 Reference-driven generation of spherical geometric capsid particles in Python.
 Particles derive radial element targets and residue composition from an
@@ -8,17 +8,19 @@ Particles derive radial element targets and residue composition from an
 step-profile control wall. They are for geometry and
 visualization, not chemically valid protein design or molecular dynamics.
 
-Version 0.1.14 adds opt-in bin dithering, opt-in wall-first transport, an
-independent held-out measure and contact-zone diagnostics. Defaults retain
-v0.1.13 transport and ranking. Reference/step targets, mandatory geometry and
-calibration definitions are unchanged. Use
+Version 0.1.15 adds bounded pre-feasible residue recovery (on by default),
+opt-in whole-residue wall translations and undo diagnostics by residue relation.
+Wall selection remains `edge-first` and bin dithering remains 1. Reference/step
+targets, mandatory geometry and calibration definitions are unchanged. Set
+`--repair-residue-reset off` for v0.1.14 repair. Use
 `--refine-landing legacy` for v0.1.12 landing behavior. Add it to
-`--wall-clamp legacy --refine-drift-step legacy` for the earlier search behavior.
+`--wall-clamp legacy --refine-drift-step legacy --repair-residue-reset off`
+for the earlier search behavior.
 
 **Status:** geometric prototype with synthetic regression tests, complete 1CWP
-benchmarks through v0.1.12 and reference-resampling calibration. The v0.1.14
-revision is implementation only: no tests were added or run and no benchmarks
-were run. Its new behaviours await user validation.
+benchmarks through v0.1.12 and reference-resampling calibration. v0.1.15 adds
+synthetic unit coverage and runs the existing suite; no benchmarks or production
+particles are run in this revision. Full-capsid behavior awaits user validation.
 Independent experimental
 validation and broader capsid coverage remain pending.
 The bounded heuristic search may fail to find a feasible particle.
@@ -270,7 +272,11 @@ validation remains independent.
 | `--refine-iterations` | unset | Optional cap on all iterations since first feasible geometry, including repair and rollback; off by default. |
 | `--refine-patience` | 10 | Pushes without significant improvement before stopping; 0 disables this check. |
 | `--refine-bin-dither` | 1 | Opt-in N offset partitions; cycle transport and rank by mean errors when N > 1. |
-| `--refine-wall-selection` | `edge-first` | Opt-in `wall-first` starts with nearest-wall atoms in surplus wall bins; requires crossing selection and fixed-speed drift. |
+| `--refine-wall-selection` | `edge-first` | Opt-in `wall-first` moves nearest-wall atoms; `wall-residue` moves their whole residues. Both require crossing selection and fixed-speed drift. |
+| `--refine-wall-residue-step` | 0.5 Å | Largest wall-residue translation, range 0.02–1.0 Å; an explicitly supplied value warns when another selector is active. |
+| `--repair-residue-reset` | `on` | Recover persistent disconnections/clashes before first feasible geometry; `off` retains v0.1.14 repair. |
+| `--repair-stuck-iterations` | 50 | Consecutive bad repair iterations before a reset, integer ≥5. |
+| `--repair-reset-limit` | 5 | Maximum successful resets per residue, integer ≥1. |
 | `--refine-strength` | 0.005 | Radial strength; fixed by default. |
 | `--refine-strength-control` | `fixed` | Keep strength fixed, follow primary profile `gain`, or restore `acceptance` feedback. Applies to per-atom acceptance. |
 | `--refine-min-step` | 0.002 A | Raise nonzero requests below this size when the desired distance is at least this large; 0 disables; must not exceed max step. |
@@ -1135,8 +1141,89 @@ Use these measures together when comparing particles:
 Standalone `validate` needs no new options: it restores N from the generation
 report, defaulting to 1 for older reports, and computes all applicable measures.
 Calibration remains on the generation bins; no dithered-error calibration is
-introduced. This revision adds no tests and runs no code or benchmarks; the
-new opt-in behavior and diagnostics await user verification.
+introduced. The v0.1.14 revision added no tests or benchmark runs; its full-size
+behavior remains subject to user verification.
+
+## Repair recovery and whole-residue wall moves (v0.1.15)
+
+The supplied run9/run10 observations included three internally disconnected
+residues persisting for roughly 2,100 iterations; one run also retained two
+anchored-S clashes. Existing bridge forces did not resolve them. Separately,
+single-atom wall moves were often rejected for approaching deeper partners:
+410k of 825k proposals were undone as too close, while a 0.02 Å drift speed
+required many pushes to traverse 0.1–0.2 Å. These observations motivate this
+revision; no production improvement is claimed from the unit tests.
+
+### Bounded pre-feasible recovery
+
+`--repair-residue-reset on` tracks consecutive disconnection and clash streaks
+in integer arrays indexed by synthetic residue id. It is active only during
+repair **before first feasible geometry**. A residue that leaves either bad
+set loses that streak. No forces, positions or RNG state change until recovery
+fires; `off` retains the previous repair updates.
+
+At the stuck threshold, a disconnected residue is fitted back to its reference
+template by a proper Kabsch rotation and translation. For a persistent clash,
+move the non-anchored residue if only one is anchored; otherwise move the
+smaller residue, breaking size ties by higher id. Fit its template and give it
+a seeded 0.5 Å tangential translation. Restore anchored sulfur to its previous
+radius. If needed, translate the whole template along its centroid radius to
+fit the support with 0.01 Å spare. Incompatible support/anchor requirements skip
+the reset without changing coordinates or RNG state, and keep the streak.
+All other force contributions on a successfully reset residue are zeroed for
+that iteration. Fresh geometry checks still decide feasibility next iteration.
+
+Each residue gets at most five successful resets by default. Longest streaks
+come first, with at most `max(1,floor(0.001*residue_count))` successes per
+iteration. These actions consume the existing iteration/time budgets. The
+`search.repair_resets` block records configuration, total resets, skipped-support
+attempts, exhausted residue ids and up to 200 detailed events. Each event logs
+its iteration/residue/kind/streak; `repair_history` adds `resets_so_far`.
+
+### Opt-in rigid wall translations
+
+Use `--refine-wall-selection wall-residue` to reserve complete residues from
+nearest-wall atoms in surplus wall bins, before normal crossing/drift selection.
+Each selected atom proposes an inward rigid translation toward the interior
+edge plus a landing offset, capped by `--refine-wall-residue-step`. Multiple
+proposals for one residue retain the largest, with first-selection residue order.
+Skip blocked/used residues and translations that leave generation support or
+change an anchored S bin. Successful reservations update every element's bin
+balance and mark all partner atoms used. Whole-group expansion can consume more
+atoms than the seed-atom selection budget; normal selection uses the remaining
+per-element capacity.
+
+All other atom-wise force pieces, including nearest-neighbor forces, are zeroed
+on reserved rigid residues. The update cap and neighbor envelope cover the
+larger step. For checked trials, a rejection or half-step acts on the complete
+residue. One shared translation is quantized to PDB precision, preserving
+internal distances even under backtracking. Unchanged intra-residue floors and
+contacts inherit the feasible snapshot; external interactions retain all guards.
+Normal proposals in other residues retain their existing acceptance behavior.
+Legacy landing is supported; crossing selection and auto/numeric drift are
+required, as for wall-first. Dithering and wall-selection defaults do not change.
+
+Per-push `wall_residue` reports proposed/accepted residue and atom counts, mean
+proposed translation and inner/outer counts. Accepted groups must retain a
+nonzero uniform translation; rolled-back/unverified pushes do not count accepted
+groups. Search totals sum proposed/accepted residues. Transient selected atom/id
+arrays are not serialized into push history.
+
+```bash
+--refine-bin-dither 4 --refine-wall-selection wall-residue
+```
+
+### Undo diagnosis
+
+`undone_too_close_by_relation` splits offending moving atoms into `same_residue`
+and `other_residue`, globally and per element. An atom may appear in both sets.
+With backtracking, only atoms finally undone count. Wall-origin atoms also get
+`wall_undone_by_reason` and `wall_undone_too_close_by_relation`; search reports
+sum both global and wall-origin relation counters over pushes. These help
+distinguish pressure against a residue's own partners from neighboring residues.
+They are diagnostics, not new acceptance rules. Mandatory audits and tolerance
+semantics remain unchanged. The unit suite is the only execution in this
+revision; the user runs full-size benchmarks afterwards.
 
 ## Calibration
 
