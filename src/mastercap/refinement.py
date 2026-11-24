@@ -82,9 +82,35 @@ def bin_inventory(radial, element_indices, edges, profiles):
     return bins, result
 
 
+def resolve_drift_step(value, bin_width, min_step=.002, max_step=.05):
+    if not np.isfinite([bin_width,min_step,max_step]).all() or bin_width<=0 or max_step<=0 or not 0<=min_step<=max_step:
+        raise MastercapError('Require positive bin/max step and 0 <= min step <= max step')
+    if value == 'legacy':return None
+    if value == 'auto':return max(min_step,min(max_step,.02*bin_width))
+    try:step=float(value)
+    except (ValueError,TypeError):raise MastercapError('Refine drift step must be auto, legacy, or a positive A value') from None
+    if not np.isfinite(step) or step<=0 or step>max_step:
+        raise MastercapError('Refine drift step must be positive and no larger than refine max step')
+    return step
+
+
+def effective_patience(patience, bin_width, drift_step):
+    return max(patience,2*int(np.ceil(.5*bin_width/drift_step))) if patience and drift_step is not None else patience
+
+
 def apply_crossing_push(force, radial, direction, element_indices, profiles, edges,
-                        strength, max_step, fraction, min_step=0.002, blocked=None, anchor_bins=None):
-    """Reserve adjacent-bin quotas, then drift remaining atoms toward useful edges."""
+                        strength, max_step, fraction, min_step=0.002, blocked=None, anchor_bins=None, drift_step="auto", transport_factor=2.0, routing="cumulative"):
+    """Reserve cumulative (or legacy local) edge quotas, then select near-edge drifters."""
+    drift_step = resolve_drift_step(drift_step, float(np.mean(np.diff(edges))), min_step, max_step)
+    if not np.isfinite(transport_factor) or transport_factor<=0:
+        raise MastercapError("Refine transport factor must be positive")
+    if routing not in ('local','cumulative'):raise MastercapError('Transport routing must be local or cumulative')
+    if drift_step is None:routing='local'
+    def quota_for(balance,edge,source,destination,sign):
+        if routing=='cumulative':
+            flux=float(np.sum(balance[:edge]))*sign
+            return flux if flux>=1-1e-8 else 0.
+        return min(balance[source],-balance[destination]) if balance[source]>0 and balance[destination]<0 else 0.
     bins, inventory = bin_inventory(radial, element_indices, edges, profiles)
     blocked = np.zeros(len(radial), dtype=bool) if blocked is None else blocked
     used = np.zeros(len(radial), dtype=bool)
@@ -92,6 +118,7 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
     if anchor_bins is not None:
         anchor_target[anchor_bins[0]] = anchor_bins[1]
     selected, absolute, per_element = [], [], {}
+    all_drift_distances=[]
     for e, indices in element_indices.items():
         _, _, balance = inventory[e]
         capacity = int(np.floor(fraction*len(indices)))
@@ -99,9 +126,9 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
         crossing_count = 0
         for edge in range(1, len(edges)-1):
             for source, destination, sign in ((edge-1, edge, 1), (edge, edge-1, -1)):
-                if balance[source] <= 0 or balance[destination] >= 0:
-                    continue
-                quota = int(np.floor(min(balance[source], -balance[destination])+1e-8))
+                remaining=quota_for(balance,edge,source,destination,sign)
+                if remaining<=0:continue
+                quota = int(np.floor(remaining+1e-8))
                 count = min(quota, capacity-len(chosen))
                 if count <= 0:
                     continue
@@ -121,21 +148,26 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
         drift_indices, drift_distance, drift_sign = [], [], []
         for edge in range(1, len(edges)-1):
             for source, destination, sign in ((edge-1, edge, 1), (edge, edge-1, -1)):
-                if balance[source] <= 0 or balance[destination] >= 0:
-                    continue
+                remaining=quota_for(balance,edge,source,destination,sign)
+                if remaining<=0:continue
                 candidates = indices[(bins[indices] == source) & ~blocked[indices] & ~used[indices]]
                 distance = np.abs(radial[candidates]-edges[edge])
-                eligible = distance > max_step
+                eligible = np.flatnonzero(distance > max_step)
+                if drift_step is not None:
+                    quota=int(np.ceil(transport_factor*remaining-1e-8))
+                    eligible=eligible[np.argsort(distance[eligible],kind="stable")[:quota]]
                 drift_indices.append(candidates[eligible])
                 drift_distance.append(distance[eligible])
-                drift_sign.append(np.full(int(eligible.sum()), sign))
+                drift_sign.append(np.full(len(eligible), sign))
         if drift_indices and len(chosen) < capacity:
             ix, distance, sign = map(np.concatenate, (drift_indices, drift_distance, drift_sign))
             order = np.argsort(distance, kind="stable")
             _, first = np.unique(ix[order], return_index=True)
             order = order[np.sort(first)][:capacity-len(chosen)]
             take = ix[order]
-            move = minimum_moves(sign[order]*distance[order], strength, min_step, max_step)
+            move = (minimum_moves(sign[order]*distance[order], strength, min_step, max_step)
+                    if drift_step is None else sign[order]*np.minimum(distance[order]+.002,drift_step))
+            all_drift_distances.extend(distance[order].tolist())
             chosen.extend(take.tolist())
             requested.extend(move.tolist())
             used[take] = True
@@ -157,7 +189,10 @@ def apply_crossing_push(force, radial, direction, element_indices, profiles, edg
             "atoms_pushed": int(np.count_nonzero(moves)),
             "mean_requested_radial_move_angstrom": float(moves.mean()) if len(moves) else 0.0,
             "max_requested_radial_move_angstrom": float(moves.max()) if len(moves) else 0.0,
-            "fraction": float(fraction), "max_step_angstrom": float(max_step), "per_element": per_element}, chosen
+            "fraction": float(fraction), "max_step_angstrom": float(max_step), "per_element": per_element,
+            "transport_routing":routing, "mean_distance_to_edge_of_drifters":float(np.mean(all_drift_distances)) if all_drift_distances else None,
+            "drift_proposals":sum(p['drift_proposals'] for p in per_element.values()),
+            "crossing_proposals":sum(p['crossing_proposals'] for p in per_element.values())}, chosen
 
 
 def damage_summary(iteration, geometry):
@@ -250,6 +285,9 @@ def finish_push_metrics(record, summary):
 
 def classify_stall(history, patience):
     window = history[-patience:] if patience else history
+    if (window and not any(p.get('bin_crossings',sum(v.get('bin_crossings',0) for v in p.get('per_element',{}).values())) for p in window)
+            and any(p.get('drift_proposals',sum(v.get('drift_proposals',0) for v in p.get('per_element',{}).values())) for p in window)):
+        return 'transport_starved'
     if window and np.mean([p.get("actual_move", {}).get("mean_move_angstrom", 0) for p in window]) < 0.001:
         return "moves_below_rounding"
     if window and np.mean([p.get("acceptance_fraction", 1) for p in window]) < 0.3:
@@ -259,13 +297,14 @@ def classify_stall(history, patience):
 
 def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
                  mode="independent", max_step=0.05, selected_indices=None, return_undone=False,
-                 anchor_bins=None):
+                 anchor_bins=None, backtrack=False):
     """Reject conflicting moved atoms/residues while retaining every old contact.
 
     Candidate pairs cover trial/trial AND trial/snapshot combinations, since
     reverting one end can create a new collision. No component calculation is
     needed: preserving the snapshot edges preserves both connectivity graphs.
     """
+    backtrack=bool(backtrack and mode=='independent')
     trial = np.round(trial, 3)
     proposed = np.any(trial != snapshot, axis=1)
     proposals = proposed.copy()
@@ -295,7 +334,13 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
         for a, ai in metadata.element_indices.items():
             source = ai[proposed[ai]]
             for b, bi in metadata.element_indices.items():
-                bound = metadata.lower_matrix[metadata.codes[ai[0]], metadata.codes[bi[0]]]+0.003
+                code_a,code_b=metadata.codes[ai[0]],metadata.codes[bi[0]]
+                bound = metadata.lower_matrix[code_a,code_b]
+                if metadata.inter_residue_lower is not None:bound=max(bound,metadata.inter_residue_lower[code_a,code_b])
+                bound+=.003
+                # Partial trial positions lie between endpoints: cover the full
+                # movement envelope for new floors/backtracking, preserving legacy.
+                if backtrack or metadata.inter_residue_enabled:bound+=2*max_step
                 if bound > radius:
                     collect(source, (bi, positions[bi]), bound)
     pairs = np.unique(np.vstack(blocks), axis=0)
@@ -350,12 +395,19 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
             reject = np.isin(metadata.residues, np.unique(metadata.residues[reject])) & moving
         return reject
 
+    backtracked=np.zeros(len(snapshot),dtype=bool)
+    backtracking_rounds=0
     passes = 0
-    for passes in range(1, 4):
+    for passes in range(1, 8 if backtrack else 4):
         reject = offenders()
         if not reject.any():
             break
-        trial[reject] = snapshot[reject]
+        if backtrack and passes<=4:
+            backtracked |= reject
+            backtracking_rounds+=1
+            trial[reject]=np.round((trial[reject]+snapshot[reject])/2,3)
+        else:
+            trial[reject] = snapshot[reject]
     reject = offenders()
     expanded = 0
     if reject.any():
@@ -375,6 +427,10 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
         retained[:] = False
     proposal_count = int(proposals.sum())
     undone = proposals & ~retained
+    guard_reasons={name:int(mask.sum()) for name,mask in reasons.items()} if backtrack else None
+    if backtrack:
+        reasons={name:mask & undone for name,mask in reasons.items()}
+        pair_rejections={pair:{i for i in indices if undone[i]} for pair,indices in pair_rejections.items()}
     per_element = {e: {"accepted": int(retained[ix].sum()), "undone": int(undone[ix].sum()),
                        "undone_too_close": int(reasons["too_close"][ix].sum()),
                        "undone_contact_broken": int(reasons["contact_broken"][ix].sum())}
@@ -394,6 +450,9 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
                    "check_passes": passes, "expanded_undo_atoms": expanded,
                    "safety_reverted_all": safety_reverted_all, "center_rejected": center_rejected,
                    "per_element": per_element}
+    if backtrack:
+        details.update(backtracked_atoms=int(backtracked.sum()),backtracked_accepted_atoms=int((backtracked & accepted).sum()),
+                       backtracking_rounds=backtracking_rounds,backtracking_guard_reasons=guard_reasons)
     return (trial, details, undone) if return_undone else (trial, details)
 
 

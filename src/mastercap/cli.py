@@ -15,6 +15,9 @@ import numpy as np
 import scipy
 
 from . import __version__
+from .diagnostics import particle_diagnostics, mesh_sizes
+from .refinement import resolve_drift_step
+from .constraints import GeometryMetadata, inter_residue_configuration
 from .analysis import (analyze, build_target, distance_statistics, parse_limit_override,
                        resolve_limit_overrides)
 from .constraints import (acceptance, profile_metrics, validate_geometry,
@@ -51,14 +54,45 @@ def final_connectivity_check(structure, margin, geometry, report):
 
 
 
-def final_pair_distance_check(structure, limits, report):
-    audit = pair_distance_audit(structure, limits)
+def final_pair_distance_check(structure, limits, report, inter_limits=None):
+    audit = pair_distance_audit(structure, limits, inter_residue_limits=inter_limits)
     report['pair_distance_audit'] = audit
     require_pair_distance_audit(audit)
     sulfur = audit['pairs'].get('S-S', {})
     if sulfur.get('minimum_distance_angstrom') is not None:
         names = ' / '.join(f"{a['residue_name']} {a['residue_number']} {a['atom_name']}" for a in sulfur['closest_atoms'])
         LOG.info('Closest S-S: %.3f A (%s)',sulfur['minimum_distance_angstrom'],names)
+
+
+def final_metadata(structure, analysis):
+    if not analysis.inter_residue:return None
+    return GeometryMetadata.build(structure,analysis.limits,enforce_covalent_floor=True,
+                                   inter_residue_limits=analysis.inter_residue,inter_residue_scale=analysis.inter_scale,
+                                   overridden_pairs=[r['pair'] for r in analysis.distance_limit_overrides])
+
+
+def add_diagnostics(report, structure, analysis, center, target, sizes, transforms=None):
+    key=tuple(sizes)
+    if key not in analysis.diagnostics_cache:
+        LOG.info('Computing reference packing diagnostics (cached per analysis)')
+        analysis.diagnostics_cache[key]=particle_diagnostics(analysis.structure,analysis.center,analysis.edges,None,
+                                                            element_sizes=sizes,
+                                                            transforms=[{'rigid_fit_rmsd_angstrom':0.}])
+    LOG.info('Computing particle packing, wall and layering diagnostics')
+    d=particle_diagnostics(structure,center,target.edges,target.profiles,target.step,sizes,
+                           analysis.diagnostics_cache[key],transforms=transforms)
+    report['diagnostics']=d
+    ref=d['reference'];h=str(min(sizes));threshold=d['contacts']['gap_threshold_angstrom'][h]
+    def number(value):return f'{value:.4g}' if value is not None else 'n/a'
+    LOG.info('Diagnostics: overlap/atom %s (ref %s); near-gap<%.3g %s (ref %s); '
+             'inter-residue <2.0 A %s/atom (ref %s); walls inner/outer within 0.01 A: %d/%d '
+             '(expected within 0.01 A ~%s/%s); layering SD %s; residue drift median %s A',
+             number(d['contacts']['overlap_per_atom']),number(ref['contacts']['overlap_per_atom']),threshold,
+             number(d['contacts']['near_gap_per_atom'][h]),number(ref['contacts']['near_gap_per_atom'][h]),
+             number(d['inter_residue']['close_contacts_per_atom']['2.0']),number(ref['inter_residue']['close_contacts_per_atom']['2.0']),
+             d['walls']['inner']['atoms_within']['0.01'],d['walls']['outer']['atoms_within']['0.01'],
+             number(d['walls']['inner']['expected_within_0p01']),number(d['walls']['outer']['expected_within_0p01']),
+             number(d['layering']['relative_sd']),number(d['residue_drift']['median_angstrom']))
 
 
 class ProfileToleranceAction(argparse.Action):
@@ -145,6 +179,7 @@ class DetailedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.Raw
         "smoothing_sigma": "1.0 (0 with --step-profile)",
         "step_edge_width": "4.0 with --step-profile",
         "floor_basis": "orientation (counting with --step-profile)",
+        "inter_residue_scale": "1.0 with --inter-residue-limits reference",
     }
 
     def _get_help_string(self, action):
@@ -342,6 +377,28 @@ for _command, _example in {
     COMMAND_EXAMPLES[_command] += '\nStep example:\n  '+_example+'\n'
 
 
+FEM_HELP = """
+FEM-ORIENTED DIAGNOSTICS:
+  Reports compare particle and reference sphere overlaps, near gaps, non-bonded
+  inter-residue contacts, wall densities, 1 A layering and residue deformation.
+  Under sphere/intersect meshing, sqrt(3)*h is the potential gap-bridging scale:
+  0.866 A at h=0.5 A and 1.732 A at h=1 A. These are geometric diagnostics,
+  not an exact voxelization of a particular grid. They NEVER change status.
+  Across an R x thickness series, compare the same overlap, near-gap, contact,
+  wall and layering measurements to hold the approximation constant.
+  Generation controls (validation reuses the saved settings):
+  --wall-clamp band uses fixed seeded depths rather than piling atoms on a wall.
+  --refine-drift-step auto uses fixed-speed edge transport and per-edge quotas;
+  cumulative imbalance routes through intervening bins. Independent conflicting
+  trials can take checked half-steps before rejection, without weakening guards.
+  patience allows transit time (0 still disables patience). Use wall-clamp legacy
+  and refine-drift-step legacy together to reproduce v0.1.11 search behavior.
+  Optional inter-residue-limits reference adds scaled non-bonded reference floors
+  between residues; intra-residue bounds are unchanged and pair overrides win.
+  Narrow contact windows warn; no positive C/N/O window fails before search.
+  These packing controls do not change calibration settings or target profiles.
+"""
+
 SMOOTHING_HELP = """
 Smoothing and radial resolution:
   --smoothing-sigma is Gaussian width in A, not a number of bins. Higher sigma
@@ -367,6 +424,11 @@ Exit codes:
   2    Approximate/uncalibrated result saved or verified; also CLI usage errors.
   130  Interrupted.
 """
+
+
+def drift_step_spec(value):
+    if value in ('auto','legacy'):return value
+    return finite_positive(value)
 
 
 def finite_nonnegative(value):
@@ -430,7 +492,7 @@ def parser():
                        "calibrate": "Measure reference profile error levels (counting, orientation, placement floors), optionally compare other structures, and suggest per-element tolerances. No particle is generated."}[name]
         command = sub.add_parser(name, help=description, description=description,
                                  formatter_class=DetailedHelpFormatter,
-                                 epilog=COMMAND_EXAMPLES[name]+(STEP_HELP+SMOOTHING_HELP if name != "validate" else "")+"\n"+EXIT_HELP)
+                                 epilog=COMMAND_EXAMPLES[name]+(FEM_HELP if name in ("generate","validate") else "")+(STEP_HELP+SMOOTHING_HELP if name != "validate" else "")+"\n"+EXIT_HELP)
         result.command_parsers.append(command)
         if name!="calibrate":
             command.add_argument("--pair-limit-override", action=PairLimitAction, metavar="PAIR=VALUE", help="Repeatable positive A/steric/pooled/reference distance override; steric uses element-derived measured ratios; all new overrides obey the covalent floor; default S-S=steric. Use S-S=reference for old spacing. Validation applies saved numeric override values")
@@ -481,6 +543,12 @@ def parser():
             command.add_argument("--refine-strength", type=finite_positive, default=0.005, help="Radial strength, fixed by default; gain/acceptance controls adapt up to 4x and stall below 1/16; rollback retains damage feedback")
             command.add_argument("--refine-strength-control", choices=("fixed", "gain", "acceptance"), default="fixed", help="Per-atom strength: fixed keeps the starting value; gain follows primary profile improvement; acceptance restores the previous acceptance feedback. Rollback mode retains damage feedback")
             command.add_argument("--refine-min-step", type=finite_nonnegative, default=0.002, help="Minimum nonzero requested radial move in A when the target mismatch is at least this large; must not exceed --refine-max-step; 0 disables")
+            command.add_argument('--inter-residue-limits',choices=('off','reference'),default='off',help='Optional non-bonded nearest-reference inter-residue distance floors; off retains old bounds')
+            command.add_argument('--inter-residue-scale',type=finite_positive,default=None,help='Scale reference inter-residue floors (default 1.0); requires --inter-residue-limits reference; pair overrides take precedence')
+            command.add_argument('--wall-clamp',choices=('band','legacy'),default='band',help='Repair outside atoms into a fixed seeded edge-band depth; legacy retains the old wall clamp')
+            command.add_argument('--refine-drift-step',type=drift_step_spec,default='auto',help='Cumulative edge transport in A: auto=max(min step,min(max step,0.02*bin width)); checked independent half-step fallback; legacy keeps old speed/local quotas/rejection')
+            command.add_argument('--refine-transport-routing',choices=('cumulative','local'),default='cumulative',help='Cumulative imbalance carries material through intervening bins; local restricts transfers to adjacent surplus/deficit bins; legacy drift forces local routing')
+            command.add_argument('--refine-transport-factor',type=finite_positive,default=2.0,help='Maximum drifters per edge/direction = ceil(factor * remaining quota); legacy drift retains old quotas')
             command.add_argument("--refine-selection", choices=("crossing", "mismatch"), default="crossing", help="Crossing targets useful adjacent-bin crossings, then drifts surplus atoms toward edges; skips previous rejected atoms. Mismatch keeps v0.1.5 rank-matched selection")
             command.add_argument("--refine-max-step", type=finite_positive, default=0.05, help="Maximum absolute requested radial profile move per selected atom in A; excludes other forces and rigid projection")
             command.add_argument("--refine-fraction", type=positive_fraction, default=0.2, help="Crossing/drift atom budget per element, rounding down; mismatch rounds up and prefers largest radial mismatches; must be in (0, 1]")
@@ -500,6 +568,7 @@ def parser():
             command.add_argument("--allow-approximate", action="store_true", help="Permit soft-tolerance deviations or uncalibrated results; mandatory constraints may NEVER be relaxed")
             command.add_argument("--allow-independent-fallback", action="store_true", help="Explicitly allow retrying a failed rigid-residue search in independent mode")
         if name in ('generate','validate'):
+            command.add_argument('--mesh-element-sizes',type=mesh_sizes,default="0.5,1.0",help='Comma-separated positive mesh element sizes in A; diagnostic gap thresholds sqrt(3)*h only; never changes status')
             command.set_defaults(profile_tolerance_spec=None)
             command.add_argument('--profile-tolerance',action=ProfileToleranceAction,help='Per-element normalized profile error: NUMBER, C=0.02,N=0.04,..., or C=0.02,*=0.05; each target element needs its own value or *; no automatic default')
             command.add_argument('--composition-tolerance',type=finite_nonnegative,help='Relative per-element count error limit, with a minimum one-atom allowance')
@@ -536,13 +605,20 @@ def analysis_options(args):
     return {"width": args.bin_width, "sigma": 0.0 if args.no_smoothing else args.smoothing_sigma,
             "radius_method": args.radius_method, "percentiles": args.radius_percentiles,
             "distance_percentile": args.distance_percentile, "min_samples": args.min_pair_samples,
-            "pair_limit_overrides": resolve_limit_overrides(args.pair_limit_override), **target_options}
+            "pair_limit_overrides": resolve_limit_overrides(args.pair_limit_override),
+            "inter_residue_limits":getattr(args,'inter_residue_limits','off'),
+            "inter_residue_scale":getattr(args,'inter_residue_scale',1.0), **target_options}
 
 
 def resolve_target_options(args):
     """Resolve contextual defaults and reject incompatible flags before input I/O."""
     if args.command == 'validate':
         return
+    if args.command == 'generate':
+        if args.inter_residue_limits=='off' and args.inter_residue_scale is not None:
+            raise MastercapError('--inter-residue-scale requires --inter-residue-limits reference')
+        args.inter_residue_scale=1.0 if args.inter_residue_scale is None else args.inter_residue_scale
+        resolve_drift_step(args.refine_drift_step,args.bin_width,args.refine_min_step,args.refine_max_step)
     if not args.step_profile and args.step_edge_width is not None:
         raise MastercapError('--step-edge-width requires --step-profile')
     if args.step_profile and args.smoothing_sigma is not None and args.smoothing_sigma > 0:
@@ -696,6 +772,8 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
     LOG.info("Selected reference: %d atoms; target radii %.3f..%.3f A; seed %d", len(analysis.structure.atoms), edges[0], edges[-1], args.seed)
     export_started = None
     try:
+        inter_limits, inter_report=inter_residue_configuration(analysis,args.overlap_margin,LOG.warning)
+        report['inter_residue_limits']=inter_report
         LOG.info("Selecting integer residue inventory and element counts")
         inventory_started = time.monotonic()
         try:
@@ -715,10 +793,13 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                      geometry["outside_radial_bounds"], len(geometry["disconnected_residues"]),
                      geometry["center_error_angstrom"], metrics["total_profile_error"], worst, suffix)
         mode = args.mode
+        attempt_structure = None
         def attempt(search_mode):
+            nonlocal attempt_structure
+            attempt_structure=inventory.copy()
             attempt_started = time.monotonic()
             try:
-                result, details = search(inventory.copy(), analysis, edges, profiles, center, rng,
+                result, details = search(attempt_structure, analysis, edges, profiles, center, rng,
                                          mode=search_mode, distribution=args.distribution,
                                          max_iterations=args.max_iterations,
                                          time_limit=args.time_limit-timings["search"],
@@ -745,6 +826,9 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                                          reconsolidate_below=args.reconsolidate_below,
                                          reconsolidate_every=args.reconsolidate_every,
                                          reconsolidate_iterations=args.reconsolidate_iterations,
+                                         wall_clamp=args.wall_clamp,step_edge_width=target.step['edge_width'] if target.step else None,
+                                         refine_drift_step=args.refine_drift_step,refine_transport_factor=args.refine_transport_factor,bin_width=args.bin_width,
+                                         refine_transport_routing=args.refine_transport_routing,
                                          target_model="step" if target.step else "reference",
                                          original_profiles=target.reference_on_edges, stage_progress=LOG.info)
             except MastercapError:
@@ -768,6 +852,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
             particle, search_report = attempt(mode)
         report["effective_mode"] = mode
         report["search"] = search_report
+        report["wall_clamp"] = search_report.get("wall_clamp")
         timings["preparation"] = time.monotonic()-started-timings["search"]
         LOG.info("Preparation %.3f s; repair search %.3f s / %.3f s; termination=%s",
                  timings["preparation"], timings["search"], args.time_limit, search_report.get("termination", "preparation_error"))
@@ -784,6 +869,17 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                  search_report.get("stall_cause") or "none",
                  f"{np.median(recoveries):g}" if search_report.get("repair_attempts", 0) else "0 attempted")
         if particle is None:
+            if attempt_structure is not None:
+                diagnostic_started=time.monotonic()
+                last=attempt_structure.copy();last.xyz=np.round(last.xyz,3)
+                report['diagnostics_state']='last search coordinates; no PDB exported'
+                report['diagnostic_geometry']=validate_geometry(last,center,edges,analysis.limits,args.overlap_margin,mode,
+                                                               metadata=final_metadata(last,analysis))
+                add_diagnostics(report,last,analysis,center,target,args.mesh_element_sizes,residue_transforms(last,analysis.structure))
+                if target.step:
+                    coarse=build_target(analysis,args.inner_radius,args.outer_radius,step=True,edge_width=args.step_edge_width,bin_width=4.)
+                    report['diagnostic_metrics_rebinned_4A']=profile_metrics(last,center,coarse.edges,coarse.profiles,coarse.reference_on_edges)
+                timings['failed_state_diagnostics']=time.monotonic()-diagnostic_started
             raise MastercapError(f"Search ended ({search_report.get('termination', 'preparation_error')}) without a candidate satisfying every mandatory constraint")
         if search_report.get('termination') == 'constraints_satisfied':
             if search_report.get('status') == 'valid':
@@ -807,9 +903,9 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
         if len(reread.atoms) != len(particle.atoms):
             raise MastercapError("PDB reread changed the atom count")
         # Use actual PDB groups to check serialization did not merge residues.
-        geometry = validate_geometry(reread, center, edges, analysis.limits, args.overlap_margin, mode)
+        geometry = validate_geometry(reread, center, edges, analysis.limits, args.overlap_margin, mode,metadata=final_metadata(reread,analysis))
         final_connectivity_check(reread, args.overlap_margin, geometry, report)
-        final_pair_distance_check(reread, analysis.limits, report)
+        final_pair_distance_check(reread, analysis.limits, report,inter_limits)
         metrics = profile_metrics(reread, center, edges, profiles, target.reference_on_edges)
         status = acceptance(geometry, metrics, args.profile_tolerance, args.composition_tolerance)
         report.update({"geometry": geometry, "metrics": metrics, "status": status})
@@ -832,7 +928,9 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                 "percentile_differences_angstrom": {
                     p: observed["percentiles"][p]-baseline["percentiles"][p]
                     for p in observed["percentiles"] if p in baseline["percentiles"]}}
-        report.update({"atom_mapping": mapping, "residue_transforms": residue_transforms(particle, analysis.structure),
+        transforms = residue_transforms(particle, analysis.structure)
+        add_diagnostics(report, reread, analysis, center, target, args.mesh_element_sizes, transforms)
+        report.update({"atom_mapping": mapping, "residue_transforms": transforms,
                        "neighbor_distance_comparison": neighbor_comparison,
                        "pdb_sha256": hashlib.sha256(text.encode()).hexdigest(),
                        "elapsed_seconds": time.monotonic()-started,
@@ -907,12 +1005,13 @@ def validate_command(args, source, started, names):
         origin = analysis.structure.atoms[item["origin"]["reference_atom_index"]]
         if (atom.name, atom.element, atom.resname) != (origin.name, origin.element, origin.resname):
             raise MastercapError("PDB atom identity does not match reference provenance")
+    inter_limits, inter_report=inter_residue_configuration(analysis,config["overlap_margin"],LOG.warning)
     LOG.info("Validating geometry, connectivity and radial profiles")
-    geometry = validate_geometry(particle, center, edges, analysis.limits, config["overlap_margin"], saved["effective_mode"])
+    geometry = validate_geometry(particle, center, edges, analysis.limits, config["overlap_margin"], saved["effective_mode"],metadata=final_metadata(particle,analysis))
     audit_report = {}
     try:
         final_connectivity_check(particle, config["overlap_margin"], geometry, audit_report)
-        final_pair_distance_check(particle, analysis.limits, audit_report)
+        final_pair_distance_check(particle, analysis.limits, audit_report,inter_limits)
     except MastercapError as exc:
         failed = base_report(args, started)
         failed.update(status='failed', error=str(exc), geometry=geometry, **audit_report,
@@ -920,6 +1019,7 @@ def validate_command(args, source, started, names):
                       warnings=analysis.warnings,
                       distance_limits={'-'.join(pair):limit for pair,limit in analysis.limits.items()},
                       distance_limit_overrides=analysis.distance_limit_overrides)
+        add_diagnostics(failed,particle,analysis,center,target,args.mesh_element_sizes,saved.get('residue_transforms'))
         path = Path(str(args.output_prefix)+'.diagnostic.json')
         publish({path:encode_json(failed)},args.overwrite,[source,args.pdb,args.report])
         LOG.error('Validation failed; audit diagnostic: %s',path)
@@ -935,6 +1035,8 @@ def validate_command(args, source, started, names):
     if target.step is not None:
         report['target'] = {'center': center.tolist(), 'edges': edges.tolist(),
                             'profiles': {e:p.tolist() for e,p in profiles.items()}, 'step': target.step}
+    report["inter_residue_limits"]=inter_report
+    add_diagnostics(report, particle, analysis, center, target, args.mesh_element_sizes, saved.get("residue_transforms"))
     files = {names["json"]: encode_json(report)}
     extra_profiles(files, names, edges, target.reference_on_edges, profiles, metrics["generated_profiles"],
                    smoothing_enabled=analysis.smoothing_sigma > 0, target_label="Step target" if target.step else "Smoothed target")

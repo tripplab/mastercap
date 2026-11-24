@@ -11,6 +11,7 @@ thresholds remain provisional until calibrated on expanded CCMV 1CWP.
 | `radial.py` | Array-only shell volumes and radial bin convention. |
 | `step.py` | Analytic ramp integrals and moment-matched homogeneous targets. |
 | `calibration.py` | Profile baselines, settings compatibility and tolerance suggestions. |
+| `diagnostics.py` | Mesh-scale contacts, nonbonded reference neighbors, walls, layering and drift. |
 | `constraints.py` | Spatial checks, internal/global graphs, acceptance metrics. |
 | `generate.py` | Integer inventory, initialization, bounded repair, rigid projection. |
 | `refinement.py` | Candidate ranking, slack targets, checked partial pushes, acceptance and rollback controllers. |
@@ -385,3 +386,73 @@ material. The fitted b lies inside the geometric reference outer radius; FEM
 indentation contact should use b and explicitly distinguish its ramp support.
 No skin-core thickness rule, Gaussian smoothing change, or JSON size redesign
 is included in this revision.
+
+
+## Revision 07: packing at the mesh scale
+
+Diagnostics are separate from acceptance. Each Analysis caches reference metrics
+by mesh-size tuple. A single query_pairs list reaches 2*max(vdW)+sqrt(3)*max(h);
+pair arithmetic is chunked at 2e6. The list remains O(local pair count), not
+constant memory. Peptide-related whole residue exclusions use observed C--N
+<1.6 A geometry. Nearest nonbonded observations use adaptive per-element trees;
+reference distance inference additionally excludes S--S <2.3 A residue bonds.
+Packing contacts count pairs twice per atom; peptide bonds/residue count each
+unique residue pair once. Gaps below sqrt(3)*h are a potential intersection-mesh
+bridge scale, not an exact voxelization. Walls and detrended/plateau layering
+provide independent artifact diagnostics. Drift reuses exported transforms;
+validation can reuse them because provenance binds exact PDB coordinates.
+
+The band clamp draws two fixed depth arrays after initialization. Legacy consumes
+no draws and retains its old float-position clip. Band checks rounded coordinates,
+then pushes toward seeded depths using raw radial directions, preserving the
+spring on anchored sulfur. This avoids the raw-inside/rounded-outside fixed point
+as well as target concentration on two spheres. Draws are w*sqrt(U) on ramps and
+uniform on the first/last bin (up to 2 A) otherwise. No clipping is applied to
+in-bounds rounded positions. Event counts are atom-iterations, not unique atoms.
+
+Crossing refinement keeps nearest-edge deterministic selection but replaces slow
+strength-scaled drift with a fixed capped speed and per-edge quota. The auto
+speed is max(min_step,min(max_step,.02*requested_bin_width)); public API calls
+without a requested width use the actual average target-bin width. Remaining
+quotas are reserved after crossing proposals. A configured nonzero patience is
+expanded to 2*ceil(.5*width/speed); zero stays disabled. Useful accepted crossings
+reset the no-progress clock regardless of the significant-error threshold.
+Legacy drift retains old speed/quotas/patience; mismatch selection retains its
+previous patience. No-crossing drift windows classify as transport_starved.
+Per-push requested speed is distinct from committed motion after trial checks.
+
+Optional nonbonded floors are inferred only when enabled. Effective inter-residue
+bounds combine the original lower matrix, covalent floors and scaled nonbonded
+reference statistics, except overridden pairs; intra-residue rules stay unchanged.
+GeometryMetadata retains its old inter_residue_floor field for compatibility and
+exposes the generalized matrix through inter_residue_lower. Extra neighbor queries
+cover floors beyond normal vdW reach. Component candidates check the effective
+atom-pair bound; consolidation and accept_trial share it, including trial/snapshot
+collections for rare large floors. Independent final distance audits receive the
+same effective matrix. Narrow windows warn; no positive C/N/O window is rejected
+before search. Old reports default to off. None of these controls affect target
+or calibration compatibility. Exact voxel meshing, residue-mode improvements and
+large-report size reduction remain outside this revision.
+
+
+Benchmark-driven additions within Revision 07 refinement: the direct local-edge
+plan produced only 16.5% profile reduction and 45.8% mean acceptance on B1.
+Most residual surplus had no adjacent deficit (C: 1835 surplus versus 4.5 adjacent
+quota), so new nonlegacy transport uses q_j=sum_{k<=j}(observed_k-target_k).
+An edge moves in the sign of q_j and reserves |q_j|, enabling transit through
+balanced bins; sub-atom cumulative noise is skipped. Legacy retains local quotas.
+Checked independent trials may halve conflicting motions toward the snapshot in
+four rounds, then use the original rejection/safety path. Pair collection still
+covers trial/snapshot candidates and every original contact is protected. No
+lower bound or graph requirement is weakened. Rigid mode never interpolates.
+Final undone counters exclude successfully backtracked atoms, while separate
+backtracking guard counters retain attempted reasons. Legacy disables both new
+routing and backtracking. These additions are explicitly reported because the
+literal local-only plan did not meet its numerical acceptance criteria.
+The search records initial feasible layering cheaply for final-change comparison.
+
+The routing strategy is exposed as --refine-transport-routing cumulative/local.
+Both nonlegacy strategies use checked half-step fallback in independent mode;
+legacy drift forces the old local path without backtracking. This permits
+controlled comparisons without assuming one finite-budget strategy is best for
+both smooth step targets and sharply layered reference targets.
