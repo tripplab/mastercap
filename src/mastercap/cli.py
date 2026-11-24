@@ -16,10 +16,10 @@ import scipy
 
 from . import __version__
 from .diagnostics import particle_diagnostics, mesh_sizes
-from .refinement import resolve_drift_step
+from .refinement import resolve_drift_step, resolve_landing_depth
 from .constraints import GeometryMetadata, inter_residue_configuration
 from .analysis import (analyze, build_target, distance_statistics, parse_limit_override,
-                       resolve_limit_overrides)
+                       resolve_limit_overrides, held_out_target)
 from .constraints import (acceptance, profile_metrics, validate_geometry,
                           connectivity_audit, require_connectivity_audit,
                           pair_distance_audit, require_pair_distance_audit)
@@ -31,6 +31,17 @@ from .pdbio import download, read_pdb, pdb_text
 from .reports import encode_json, preflight, publish, profile_csv, profile_png, calibration_csv, calibration_png
 
 LOG = logging.getLogger("mastercap")
+
+
+def log_profile_errors(metrics):
+    held = metrics.get('held_out')
+    if held:
+        values = ', '.join(f'{e}={value:.4f}' if value is not None else f'{e}=n/a'
+                           for e, value in held['elements'].items())
+        own = ', '.join(f"{e}={v['profile_error']:.4f}" if v['profile_error'] is not None else f'{e}=n/a'
+                        for e,v in metrics['elements'].items())
+        LOG.info('Final normalized profile errors: %s; held-out (half-bin offset): %s, total=%s',
+                 own, values, f"{held['total_profile_error']:.6f}" if held['total_profile_error'] is not None else 'n/a')
 
 
 class PairLimitAction(argparse.Action):
@@ -82,6 +93,13 @@ def add_diagnostics(report, structure, analysis, center, target, sizes, transfor
     d=particle_diagnostics(structure,center,target.edges,target.profiles,target.step,sizes,
                            analysis.diagnostics_cache[key],transforms=transforms)
     report['diagnostics']=d
+    edge = d['edge_concentration']
+    ratio = edge['ratio_within']['0.005']
+    LOG.info('Edge concentration: within 0.005 A of interior bin edges %.3f %% (uniform ~%.3f %%, ratio %s)',
+             100*edge['fraction_within']['0.005'], 100*edge['expected_within']['0.005'],
+             f'{ratio:.3f}' if ratio is not None else 'n/a')
+    if ratio is not None and ratio > 3:
+        LOG.warning('High interior-bin edge concentration: within 0.005 A ratio %.3f exceeds 3; inspect held-out profile error', ratio)
     ref=d['reference'];h=str(min(sizes));threshold=d['contacts']['gap_threshold_angstrom'][h]
     def number(value):return f'{value:.4g}' if value is not None else 'n/a'
     LOG.info('Diagnostics: overlap/atom %s (ref %s); near-gap<%.3g %s (ref %s); '
@@ -378,6 +396,18 @@ for _command, _example in {
 
 
 FEM_HELP = """
+PROFILE ERROR MEASURES:
+  Own-bin profile error is optimized and remains the measure for tolerances,
+  acceptance and candidate ranking. Held-out error uses a half-bin-offset
+  partition of the SAME target and is never optimized or used for acceptance.
+  Compare particles using held-out error together with the interior-edge
+  concentration ratio. Low own-bin error plus a high ratio indicates edge
+  bunching; a ratio above 3 within 0.005 A warns but never changes status.
+  Random landing spreads crossing endpoints between 0.002 A and the landing
+  depth inside the destination bin. Crossings may move max-step + landing-depth;
+  these larger trials retain all geometry/anchor/contact checks and backtracking.
+  Bin dithering and held-out ranking are not implemented in this revision.
+
 FEM-ORIENTED DIAGNOSTICS:
   Reports compare particle and reference sphere overlaps, near gaps, non-bonded
   inter-residue contacts, wall densities, 1 A layering and residue deformation.
@@ -392,7 +422,8 @@ FEM-ORIENTED DIAGNOSTICS:
   cumulative imbalance routes through intervening bins. Independent conflicting
   trials can take checked half-steps before rejection, without weakening guards.
   patience allows transit time (0 still disables patience). Use wall-clamp legacy
-  and refine-drift-step legacy together to reproduce v0.1.11 search behavior.
+  and refine-drift-step legacy together with refine-landing legacy to reproduce
+  v0.1.11 search behavior (existing geometry and push fields; new diagnostics added).
   Optional inter-residue-limits reference adds scaled non-bonded reference floors
   between residues; intra-residue bounds are unchanged and pair overrides win.
   Narrow contact windows warn; no positive C/N/O window fails before search.
@@ -549,8 +580,10 @@ def parser():
             command.add_argument('--refine-drift-step',type=drift_step_spec,default='auto',help='Cumulative edge transport in A: auto=max(min step,min(max step,0.02*bin width)); checked independent half-step fallback; legacy keeps old speed/local quotas/rejection')
             command.add_argument('--refine-transport-routing',choices=('cumulative','local'),default='cumulative',help='Cumulative imbalance carries material through intervening bins; local restricts transfers to adjacent surplus/deficit bins; legacy drift forces local routing')
             command.add_argument('--refine-transport-factor',type=finite_positive,default=2.0,help='Maximum drifters per edge/direction = ceil(factor * remaining quota); legacy drift retains old quotas')
+            command.add_argument('--refine-landing',choices=('random','legacy'),default='random',help='Random spreads crossings inside destination bins using the search RNG; legacy preserves distance + 0.002 and consumes no landing draws')
+            command.add_argument('--refine-landing-depth',default='auto',help='Landing depth in A: auto=min(0.25*bin width,0.25 A); numeric range [0.002,half configured bin width], capped per destination at half its actual width; crossing moves may reach max step + depth (about 0.30 A at 1 A bins)')
             command.add_argument("--refine-selection", choices=("crossing", "mismatch"), default="crossing", help="Crossing targets useful adjacent-bin crossings, then drifts surplus atoms toward edges; skips previous rejected atoms. Mismatch keeps v0.1.5 rank-matched selection")
-            command.add_argument("--refine-max-step", type=finite_positive, default=0.05, help="Maximum absolute requested radial profile move per selected atom in A; excludes other forces and rigid projection")
+            command.add_argument("--refine-max-step", type=finite_positive, default=0.05, help="Crossing candidate reach in A; random landing allows requested crossings up to this + landing depth; legacy/mismatch retain the original move cap; excludes other forces and rigid projection")
             command.add_argument("--refine-fraction", type=positive_fraction, default=0.2, help="Crossing/drift atom budget per element, rounding down; mismatch rounds up and prefers largest radial mismatches; must be in (0, 1]")
             command.add_argument("--refine-recovery-limit", type=nonnegative_integer, default=10, help="Maximum repair updates after a damaging push before restoring its snapshot; 0 permits no repair updates")
             command.add_argument("--neighbor-forces", choices=("scaled", "off", "fixed"), default="off", help="Refinement nearest-neighbor forces: off disables them (default); scaled follows radial strength, selection and a half-step per-atom cap; fixed keeps unscaled 0.002/all-atom behavior. Targets are guarded in both active modes")
@@ -619,6 +652,8 @@ def resolve_target_options(args):
             raise MastercapError('--inter-residue-scale requires --inter-residue-limits reference')
         args.inter_residue_scale=1.0 if args.inter_residue_scale is None else args.inter_residue_scale
         resolve_drift_step(args.refine_drift_step,args.bin_width,args.refine_min_step,args.refine_max_step)
+        if (args.refine_selection == 'crossing' and args.refine_landing == 'random') or args.refine_landing_depth != 'auto':
+            resolve_landing_depth(args.refine_landing_depth,args.bin_width)
     if not args.step_profile and args.step_edge_width is not None:
         raise MastercapError('--step-edge-width requires --step-profile')
     if args.step_profile and args.smoothing_sigma is not None and args.smoothing_sigma > 0:
@@ -829,6 +864,8 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                                          wall_clamp=args.wall_clamp,step_edge_width=target.step['edge_width'] if target.step else None,
                                          refine_drift_step=args.refine_drift_step,refine_transport_factor=args.refine_transport_factor,bin_width=args.bin_width,
                                          refine_transport_routing=args.refine_transport_routing,
+                                         refine_landing=args.refine_landing,refine_landing_depth=args.refine_landing_depth,
+                                         held_out=held_out_target(target),
                                          target_model="step" if target.step else "reference",
                                          original_profiles=target.reference_on_edges, stage_progress=LOG.info)
             except MastercapError:
@@ -906,7 +943,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
         geometry = validate_geometry(reread, center, edges, analysis.limits, args.overlap_margin, mode,metadata=final_metadata(reread,analysis))
         final_connectivity_check(reread, args.overlap_margin, geometry, report)
         final_pair_distance_check(reread, analysis.limits, report,inter_limits)
-        metrics = profile_metrics(reread, center, edges, profiles, target.reference_on_edges)
+        metrics = profile_metrics(reread, center, edges, profiles, target.reference_on_edges, held_out=held_out_target(target))
         status = acceptance(geometry, metrics, args.profile_tolerance, args.composition_tolerance)
         report.update({"geometry": geometry, "metrics": metrics, "status": status})
         log_acceptance(status, geometry, metrics, args.composition_tolerance)
@@ -914,9 +951,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
             raise MastercapError("Written-and-reread PDB violates mandatory constraints")
         if status != "valid" and not args.allow_approximate:
             raise MastercapError(f"Candidate is {status}; provide tolerances or explicitly use --allow-approximate")
-        LOG.info("Final normalized profile errors: %s", ", ".join(
-            f"{element}={values['profile_error']:.4f}" if values["profile_error"] is not None else f"{element}=n/a"
-            for element, values in metrics["elements"].items()))
+        log_profile_errors(metrics)
         particle.xyz = reread.xyz
         LOG.info("Computing final neighbor statistics and residue provenance")
         _, generated_neighbors, _ = distance_statistics(particle, args.distance_percentile, args.min_pair_samples)
@@ -1024,7 +1059,8 @@ def validate_command(args, source, started, names):
         publish({path:encode_json(failed)},args.overwrite,[source,args.pdb,args.report])
         LOG.error('Validation failed; audit diagnostic: %s',path)
         raise
-    metrics = profile_metrics(particle, center, edges, profiles, target.reference_on_edges)
+    metrics = profile_metrics(particle, center, edges, profiles, target.reference_on_edges, held_out=held_out_target(target))
+    log_profile_errors(metrics)
     status = acceptance(geometry, metrics, config["profile_tolerance"], config["composition_tolerance"])
     log_acceptance(status, geometry, metrics, config['composition_tolerance'])
     report = base_report(args, started)

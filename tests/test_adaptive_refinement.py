@@ -318,7 +318,7 @@ def crossing_case(blocked=None, fraction=1, matched=False):
     force = np.zeros((4, 3))
     details, selected = apply_crossing_push(force, radial, np.tile([1.0, 0, 0], (4, 1)),
                                            {"C": np.arange(4)}, profiles, edges, 0.005, 0.05, fraction,
-                                           blocked=blocked)
+                                           blocked=blocked, landing_mode='legacy')
     return radial, edges, profiles, force, details, selected
 
 
@@ -349,7 +349,7 @@ def test_drift_uses_remaining_fraction_budget_and_minimum_step():
     profiles = {"C": np.array([1, 3])/shell_volumes(edges)}
     force = np.zeros((4, 3))
     details, selected = apply_crossing_push(force, radial, np.tile([1.0, 0, 0], (4, 1)),
-                                           {"C": np.arange(4)}, profiles, edges, 1e-12, 0.05, 0.5, drift_step="legacy")
+                                           {"C": np.arange(4)}, profiles, edges, 1e-12, 0.05, 0.5, drift_step="legacy", landing_mode='legacy')
     assert len(selected) == 2
     assert details["per_element"]["C"]["drift_proposals"] == 2
     assert np.all(force[selected, 0] == 0.002)

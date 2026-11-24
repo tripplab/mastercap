@@ -456,3 +456,58 @@ Both nonlegacy strategies use checked half-step fallback in independent mode;
 legacy drift forces the old local path without backtracking. This permits
 controlled comparisons without assuming one finite-budget strategy is best for
 both smooth step targets and sharply layered reference targets.
+
+## Revision 08: crossing endpoints and independent profile measurements
+
+Version 0.1.13 separates fitting fixed bins from measuring their possible
+artifacts. In the v0.1.12 B1 output, 4.88% of atoms were within 0.002 Å of a
+generation edge (uniform expectation ~0.40%), and 8.22% within 0.005 Å (~1%).
+These historical counts included walls. The fixed 0.002 Å crossing offset
+created sheets despite a 0.0027 own-bin error; the non-aligned 4 Å error was
+about 0.020. These are earlier measurements, not results of this revision.
+
+Random landing replaces crossing endpoints, not the target or quota selection.
+In stable element/selection order, the search RNG draws
+u = 0.002 + U*(min(depth, destination_width/2)-0.002), with default
+depth = min(configured_bin_width/4, 0.25 Å). Direct helper callers without a
+configured width use the largest actual width, with individual destination caps. Explicit depths
+must be finite and in [0.002, bin_width/2]; bins too narrow to accommodate this
+minimum fail clearly in random mode. A crossing request is sign*(distance+u),
+up to refine_max_step+depth. Non-reaching drift keeps its prior rule. The
+post-computation anchor-bin check is retained. Legacy landing retains old moves,
+selection order and RNG state, adding only report measurements.
+
+Only random refinement trials may exceed the general 0.2 Å update cap.
+The acceptance envelope receives the largest requested move (at least
+refine_max_step), enlarged further if rigid projection moves an atom farther.
+All distance/contact/bounds/anchor guards remain enforced. Consolidation is
+unchanged. Half-step backtracking may undo the crossing; crossing metrics use
+the accepted positions, whereas landing statistics describe requested endpoints.
+
+edge_concentration uses nearest interior edges only. For threshold t, expected
+fraction is sum_k N_k*min(1, n_interior_sides_k*t/width_k)/N. This approximates
+uniform r^2 dr at small t, and accounts for the one-sided first/last bins.
+The histogram uses ten bands through half the median bin width; tails are
+reported rather than renormalized away. A ratio >3 at 0.005 Å warns, without
+changing acceptance. Walls remain in the existing wall block.
+
+offset_edges retains support endpoints and shifts interior boundaries by half
+a bin. target_on_edges integrates step.integral analytically with each
+element's plateau density, or integrates the piecewise reference target with
+exact spherical overlap volumes. It never interpolates generation-bin counts
+for a continuous step. profile_metrics optionally adds held_out with identical
+count-normalized L1 errors and an atom-weighted total. Search measures this
+after pushes and on feasible candidates; best-history/checkpoint records keep
+both measures from the same candidate. Generate and validate recompute it on
+the actual PDB, so older reports need no migration.
+
+Ranking and acceptance remain based on own-bin metrics. Calibration code and
+compatibility settings are unchanged: its counting/orientation/placement levels
+and suggested tolerances still refer to own-bin errors. Wall/landing controls
+do not alter the target. The held-out partition is fixed and diagnostic only;
+bin dithering and held-out ranking are deferred, with no new ranking switch.
+Random requested landing does not prove that accepted atoms lack sheets; guards
+and backtracking can bias acceptance. Tests are supplied for seeded endpoints,
+legacy behavior, edge ratios, continuous/piecewise count conservation, held-out
+sheet detection, larger neighbor reach and old-report validation. Per the
+revision's execution constraint, neither these tests nor benchmarks were run.

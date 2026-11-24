@@ -26,7 +26,7 @@ def simulate(drift):
     for push in range(50):
         f=np.zeros((len(r),3))
         apply_crossing_push(f,r,np.tile([1.,0,0],(len(r),1)),{'C':np.arange(len(r))},profiles,edges,
-                            .005,.05,.2,drift_step=drift)
+                            .005,.05,.2,drift_step=drift,landing_mode='legacy')
         before=np.count_nonzero(r>=1);r+=f[:,0]
         if np.count_nonzero(r>=1)>before and first is None:first=push+1
     return first,abs(np.count_nonzero(r<1)-55)
@@ -42,7 +42,7 @@ def test_quota_caps_drifters_and_patience_matches_transit():
     r=np.r_[np.full(90,.6),np.full(10,1.5)]
     edges=np.array([0.,1.,2.]);profiles={'C':np.array([89.,11.])/shell_volumes(edges)}
     info,chosen=apply_crossing_push(np.zeros((100,3)),r,np.tile([1.,0,0],(100,1)),{'C':np.arange(100)},
-                                  profiles,edges,.005,.05,.2,transport_factor=2)
+                                  profiles,edges,.005,.05,.2,transport_factor=2,landing_mode='legacy')
     assert len(chosen)<=2
     assert info['mean_distance_to_edge_of_drifters']==pytest.approx(.4)
     assert resolve_drift_step('auto',1)==.02
@@ -71,7 +71,7 @@ def test_legacy_search_coordinates_match_v0111_fixture():
     a=analyze(s,sigma=0);edges,profiles=target_profiles(a)
     particle,report=search(s.copy(),a,edges,profiles,a.center,np.random.default_rng(42),mode='independent',distribution='regular',
                            max_iterations=1000,time_limit=30,refine_updates=3,refine_patience=0,
-                           wall_clamp='legacy',refine_drift_step='legacy')
+                           wall_clamp='legacy',refine_drift_step='legacy',refine_landing='legacy')
     # Generated independently with main@275d754, not recomputed from current code.
     np.testing.assert_array_equal(particle.xyz,[[-1.846,.56,-1.105],[-.386,.54,-.447],[1.569,.256,1.399],[1.15,-.863,.3]])
     assert [p['iteration'] for p in report['push_history']]==[13,14,15]
@@ -83,7 +83,7 @@ def test_cumulative_routing_can_traverse_an_intervening_balanced_bin():
     r=np.array([.6]*8+[1.6]*4+[2.6]*2,dtype=float)
     edges=np.arange(4.);profiles={'C':np.array([4.,4.,6.])/shell_volumes(edges)}
     kwargs=dict(radial=r,direction=np.tile([1.,0,0],(len(r),1)),element_indices={'C':np.arange(len(r))},
-                profiles=profiles,edges=edges,strength=.005,max_step=.05,fraction=1.)
+                profiles=profiles,edges=edges,strength=.005,max_step=.05,fraction=1.,landing_mode='legacy')
     local,_=apply_crossing_push(np.zeros((len(r),3)),**kwargs,routing='local')
     cumulative,selected=apply_crossing_push(np.zeros((len(r),3)),**kwargs,routing='cumulative')
     assert local['selected_atoms']==0

@@ -15,3 +15,14 @@ def make_edges(inner, outer, width):
         raise MastercapError("Requested radial resolution exceeds one million bins")
     return np.linspace(inner, outer, n + 1)
 
+
+def offset_edges(edges, fraction=0.5):
+    """Shift interior boundaries while retaining the exact support walls."""
+    edges = np.asarray(edges, dtype=float)
+    if (edges.ndim != 1 or len(edges) < 2 or not np.isfinite(edges).all()
+            or np.any(np.diff(edges) <= 0) or not np.isfinite(fraction)
+            or not 0 < fraction < 1):
+        raise MastercapError('Offset edges require increasing finite edges and 0 < fraction < 1')
+    interior = edges[:-1] + fraction*np.diff(edges)
+    return np.r_[edges[0], interior, edges[-1]]
+

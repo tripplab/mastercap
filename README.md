@@ -1,6 +1,6 @@
 # mastercap
 
-**Current version: 0.1.12**
+**Current version: 0.1.13**
 
 Reference-driven generation of spherical geometric capsid particles in Python.
 Particles derive radial element targets and residue composition from an
@@ -8,14 +8,16 @@ Particles derive radial element targets and residue composition from an
 step-profile control wall. They are for geometry and
 visualization, not chemically valid protein design or molecular dynamics.
 
-Version 0.1.12 adds packing/wall/layering diagnostics, a seeded wall-band clamp,
-faster quota-limited edge transport at fine radial bins, and optional scaled
-non-bonded inter-residue distance floors. The reference/step targets and
-calibration definitions are unchanged. Use `--wall-clamp legacy
---refine-drift-step legacy` for the earlier search behavior.
+Version 0.1.13 adds random crossing landings, interior-edge concentration
+diagnostics and a half-bin-offset held-out profile error. Reference/step targets,
+mandatory geometry and calibration definitions are unchanged. Use
+`--refine-landing legacy` for v0.1.12 landing behavior. Add it to
+`--wall-clamp legacy --refine-drift-step legacy` for the earlier search behavior.
 
 **Status:** geometric prototype with synthetic regression tests, complete 1CWP
-benchmarks and reference-resampling calibration. Independent experimental
+benchmarks through v0.1.12 and reference-resampling calibration. The v0.1.13
+changes and new tests have not been executed; benchmarks are user-run.
+Independent experimental
 validation and broader capsid coverage remain pending.
 The bounded heuristic search may fail to find a feasible particle.
 
@@ -940,7 +942,7 @@ the largest feasible scale whose observed repair-search time is within 3× off.
 The controls do not change target profiles, so calibration compatibility keys
 remain unchanged. This version does not improve rigid residue-mode packing.
 
-### Revision 07 measured results (1CWP, seed 42)
+### Revision 07 measured results (v0.1.12, 1CWP, seed 42)
 
 The 1 Å step benchmark used independent atoms, regular distribution, sulfur
 profile placement, S--S=3 Å, 50 pushes and no acceptance tolerances. Its total
@@ -993,6 +995,65 @@ total 1 Å error 0.00835, and 2/2 atoms within 0.01 Å
 of the inner/outer wall. It also passed standalone validation. Full diagnostics,
 rebinned errors, trajectories and replay settings are recorded under `revision07`
 in [benchmarks/1cwp_refinement.json](benchmarks/1cwp_refinement.json).
+
+## Bin-edge sheets and held-out profiles (v0.1.13)
+
+The v0.1.12 B1 output fitted its own 1 Å bins with error 0.0027, but 10,474
+atoms (4.88%) lay within 0.002 Å of a generation edge and 17,628 (8.22%) within
+0.005 Å. Uniform expectations were about 0.40% and 1.0%. Those earlier counts
+include walls; the new diagnostic excludes walls. Fixed `distance + 0.002`
+crossings deposited atoms in thin radial sheets. A low optimized error alone
+therefore did not establish a smooth atom-centre distribution.
+
+`--refine-landing random` is the new default for crossing refinement. Each
+requested crossing draws a seeded landing depth uniformly between 0.002 Å and
+`--refine-landing-depth`. `auto` resolves to the smaller of one quarter of the
+configured bin width and 0.25 Å. An explicit depth must be between 0.002 Å and half
+the configured bin width; narrower destination bins cap the draw range at half
+their own width. Non-reaching drift is unchanged. Draws follow element and
+selection order using the search RNG. Mismatch selection does not use landing.
+
+Crossing candidates remain within `--refine-max-step` of the edge, but requested
+crossing moves may now reach **max step + landing depth** (about 0.30 Å at
+1 Å bins), before other forces or rigid projection. Random crossing trials can
+exceed the old 0.2 Å repair-update cap; their neighbor-check envelope covers the
+largest requested and projected move. Consolidation and repair retain their
+old caps. Distance, contact, wall and anchored-sulfur checks and half-step
+backtracking remain active. A rejected or halved move may not cross an edge.
+
+`--refine-landing legacy` keeps the previous capped `distance + 0.002` moves
+and consumes no landing RNG draws. It preserves v0.1.12 coordinates and existing
+push fields for matching fixed budgets; reports gain the new diagnostic fields.
+For the earlier v0.1.11 controls, also use `--wall-clamp legacy
+--refine-drift-step legacy`.
+
+Two additional measurements accompany generation and standalone validation,
+including validation of older particles with their matching generation reports:
+
+- `diagnostics.edge_concentration` measures fractions within 0.002, 0.005 and
+  0.01 Å of **interior** generation edges. The uniform expectation weights
+  each bin's actual atom count by its number of interior sides times threshold
+  divided by width. It is a small-threshold approximation for uniform volume
+  density. Ratios compare observed and expected fractions; no interior edges
+  gives a null ratio. The ten-band histogram covers zero through half the
+  median bin width and records the fraction beyond that range separately.
+  A ratio above 3 at 0.005 Å logs a warning, without changing status.
+- `metrics.held_out` uses a half-bin-offset partition with the same support
+  walls and half bins at the ends. The continuous step model is integrated
+  directly; reference-shaped targets are integrated as piecewise-constant
+  density using shell-volume overlaps. Per-element target totals are preserved.
+  Total error remains atom-weighted, using the same integrated absolute error.
+  Push records contain `held_out_total` and `held_out_elements`; checkpoint
+  values in `errors_at_push` come from the same best candidate as own-bin values.
+
+Compare particles using **held-out error together with edge-concentration
+ratios**, as well as the existing packing and wall diagnostics. Neither new
+measurement affects candidate ranking, acceptance, exit codes, or calibration.
+Tolerances still apply to own-bin errors. Random requested endpoints do not
+guarantee an unbiased accepted distribution: geometry checks and backtracking
+can change them, so inspect these diagnostics in user-run benchmarks. This
+revision has no measured improvement claim. Bin dithering and held-out ranking
+remain unimplemented pending a separate specification; no bins are randomized.
 
 ## Calibration
 
