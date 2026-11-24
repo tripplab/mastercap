@@ -304,6 +304,7 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
     reverting one end can create a new collision. No component calculation is
     needed: preserving the snapshot edges preserves both connectivity graphs.
     """
+    backtrack=bool(backtrack and mode=='independent')
     trial = np.round(trial, 3)
     proposed = np.any(trial != snapshot, axis=1)
     proposals = proposed.copy()
@@ -337,6 +338,9 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
                 bound = metadata.lower_matrix[code_a,code_b]
                 if metadata.inter_residue_lower is not None:bound=max(bound,metadata.inter_residue_lower[code_a,code_b])
                 bound+=.003
+                # Partial trial positions lie between endpoints: cover the full
+                # movement envelope for new floors/backtracking, preserving legacy.
+                if backtrack or metadata.inter_residue_enabled:bound+=2*max_step
                 if bound > radius:
                     collect(source, (bi, positions[bi]), bound)
     pairs = np.unique(np.vstack(blocks), axis=0)
@@ -391,7 +395,6 @@ def accept_trial(snapshot, trial, local, metadata, center, edges, margin=0.0,
             reject = np.isin(metadata.residues, np.unique(metadata.residues[reject])) & moving
         return reject
 
-    backtrack=bool(backtrack and mode=='independent')
     backtracked=np.zeros(len(snapshot),dtype=bool)
     backtracking_rounds=0
     passes = 0
