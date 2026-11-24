@@ -33,6 +33,11 @@ def test_failed_generation_writes_diagnostic_only(tmp_path, small_pdb):
                  "--overlap-margin", "4", "--seed", "1", "--max-iterations", "0", "--allow-approximate"]) == 1
     assert not prefix.with_suffix(".pdb").exists()
     assert Path(str(prefix)+".diagnostic.json").exists()
+    report=json.loads(Path(str(prefix)+".diagnostic.json").read_text())
+    assert report['status']=='failed'
+    assert report['diagnostics_state']=='last search coordinates; no PDB exported'
+    assert not report['diagnostic_geometry']['mandatory_pass']
+    assert 'reference' in report['diagnostics']
 
 
 def test_generation_and_independent_validation(tmp_path, small_pdb):

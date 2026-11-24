@@ -22,6 +22,10 @@ class Analysis:
     smoothing_sigma: float = 0.0
     distance_limit_overrides: list = field(default_factory=list)
     grouped_distance_factor: float | None = None
+    diagnostics_cache: dict = field(default_factory=dict)
+    inter_residue: dict = field(default_factory=dict)
+    inter_statistics: dict = field(default_factory=dict)
+    inter_scale: float = 1.0
 
     @property
     def inner(self):
@@ -48,6 +52,9 @@ class Analysis:
                 "distance_limits": {"-".join(k): v for k, v in self.limits.items()},
                 "distance_limit_overrides": self.distance_limit_overrides,
                 "grouped_distance_factor": self.grouped_distance_factor,
+                "inter_residue_limits": {"mode":"reference" if self.inter_residue else "off", "scale":self.inter_scale,
+                                         "matrix":{"-".join(pair):value for pair,value in self.inter_residue.items()},
+                                         "reference_statistics":self.inter_statistics},
                 "neighbor_samples": self.neighbor_samples}
 
 
@@ -164,7 +171,8 @@ def apply_limit_overrides(limits, grouped, overrides=None, neighbor_samples=None
 
 def analyze(structure, width=1.0, sigma=1.0, radius_method="extrema", percentiles=(0.5, 99.5),
             distance_percentile=1.0, min_samples=100, progress=None, pair_limit_overrides=None,
-            saved_limit_overrides=None, compute_distances=True, step_profile=False, step_edge_width=4.0):
+            saved_limit_overrides=None, compute_distances=True, step_profile=False, step_edge_width=4.0,
+            inter_residue_limits="off", inter_residue_scale=1.0):
     if not np.isfinite([width, sigma]).all() or width <= 0 or sigma < 0:
         raise MastercapError("Bin width must be positive and smoothing sigma nonnegative")
     if progress:
@@ -224,8 +232,15 @@ def analyze(structure, width=1.0, sigma=1.0, radius_method="extrema", percentile
     excluded = len(structure.atoms) - len(selected.atoms)
     if excluded:
         warnings.append(f"Excluded {excluded} atoms outside selected radial interval; residues may be partial")
-    return Analysis(selected, center, edges, original, smooth, limits, samples, warnings, excluded, sigma,
+    result=Analysis(selected, center, edges, original, smooth, limits, samples, warnings, excluded, sigma,
                     override_records, grouped)
+    if inter_residue_limits not in ('off','reference') or not np.isfinite(inter_residue_scale) or inter_residue_scale<=0:
+        raise MastercapError('Inter-residue mode must be off/reference and scale finite positive')
+    if inter_residue_limits=='reference':
+        if progress:progress('Estimating non-bonded inter-residue nearest-neighbor limits')
+        result.inter_residue,result.inter_statistics,_=inter_residue_statistics(selected,distance_percentile,min_samples)
+        result.inter_scale=inter_residue_scale
+    return result
 
 
 def target_profiles(analysis, inner=None, outer=None):
@@ -307,3 +322,21 @@ def build_target(analysis, inner=None, outer=None, *, step=False, edge_width=4.0
     if not resized:
         block['reference_atoms_outside_support'] = int(np.count_nonzero((radii < edges[0]) | (radii > edges[-1])))
     return Target(edges, profiles, reference, block)
+
+
+def inter_residue_statistics(structure, percentile=1., min_samples=100):
+    """Nearest unlike-residue, non-peptide/non-disulfide observations."""
+    from .diagnostics import bond_keys,nearest_nonbonded
+    if not 0<=percentile<=100 or min_samples<1:
+        raise MastercapError('Inter-residue percentile must be in [0,100], minimum samples >= 1')
+    samples=nearest_nonbonded(structure,bond_keys(structure,disulfides=True))
+    normalized=[v/sum(VDW[e] for e in pair) for pair,v in samples.items() if len(v)]
+    if not normalized:raise MastercapError('No non-bonded inter-residue observations in reference')
+    grouped=float(np.percentile(np.concatenate(normalized),percentile))
+    limits={};report={}
+    for pair,values in samples.items():
+        fallback=len(values)<min_samples
+        limits[pair]=float(grouped*sum(VDW[e] for e in pair) if fallback else np.percentile(values,percentile))
+        report['-'.join(pair)]={'count':len(values),'grouped_fallback':fallback,
+                               'percentiles':{str(p):float(np.percentile(values,p)) for p in (1,50,99)} if len(values) else {}}
+    return limits,report,grouped

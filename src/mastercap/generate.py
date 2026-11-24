@@ -10,11 +10,12 @@ from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 
 from .model import Structure, MastercapError
+from .diagnostics import radial_layering
 from .analysis import shell_volumes
-from .constraints import GeometryMetadata, local_geometry, validate_geometry, profile_metrics, acceptance
+from .constraints import inter_residue_configuration, GeometryMetadata, local_geometry, validate_geometry, profile_metrics, acceptance
 from .refinement import (PushController, apply_radial_push, candidate_key, error_summary,
                          slack_summary, consolidation_targets, AcceptanceController,
-                         accept_trial, force_summary, crossing_metrics, classify_stall, apply_crossing_push)
+                         accept_trial, force_summary, crossing_metrics, classify_stall, apply_crossing_push, resolve_drift_step, effective_patience)
 from .refinement import errors_at_push, radial_bins, restore_anchor_bins
 
 
@@ -306,6 +307,8 @@ def connect_edges(xyz, labels, *, metadata=None, atom_indices=None, margin=0.0):
     else:
         indices = np.arange(len(xyz)) if atom_indices is None else atom_indices
         radii, codes, matrix = metadata.radii[indices], metadata.codes[indices], metadata.lower_matrix
+        if atom_indices is None and metadata.inter_residue_enabled:
+            matrix=np.maximum(matrix,metadata.inter_residue_lower)
     has_contact = np.zeros(count, dtype=bool)
     contacts = {}
 
@@ -313,7 +316,9 @@ def connect_edges(xyz, labels, *, metadata=None, atom_indices=None, margin=0.0):
         keep = labels[src] != labels[dst]
         src, dst = src[keep], dst[keep]
         if matrix is not None:
-            compatible = matrix[codes[src], codes[dst]] < radii[src]+radii[dst]-margin-0.003
+            lower=(metadata.pair_lower_bounds(np.column_stack([indices[src],indices[dst]]))
+                   if metadata.inter_residue_enabled else matrix[codes[src],codes[dst]])
+            compatible = lower < radii[src]+radii[dst]-margin-0.003
             src, dst = src[compatible], dst[compatible]
         if not len(src):
             return
@@ -436,13 +441,13 @@ def characteristic_forces(force, structure, analysis, metadata, *, mode="fixed",
         else:
             nearest = cKDTree(structure.xyz[bi]).query(structure.xyz[ai], k=1)[1]
         pairs = np.column_stack([ai, bi[nearest]])
-        safe_lower = lower+guard
+        safe_lower = metadata.pair_lower_bounds(pairs)+guard if getattr(analysis,"inter_residue",None) else lower+guard
         safe_upper = metadata.radii[pairs].sum(axis=1)-margin-guard
         valid = safe_lower < safe_upper
         pairs = pairs[valid]
         if not len(pairs):
             continue
-        desired = np.clip(summary["50"], safe_lower, safe_upper[valid])
+        desired = np.clip(summary["50"], safe_lower[valid] if isinstance(safe_lower,np.ndarray) else safe_lower, safe_upper[valid])
         pair_forces(neighbor, structure.xyz, pairs, desired, strength=strength)
     if selected_indices is not None:
         selected = np.zeros(len(neighbor), dtype=bool)
@@ -457,6 +462,21 @@ def characteristic_forces(force, structure, analysis, metadata, *, mode="fixed",
             "mean_move_angstrom": float(norm.mean()), "max_move_angstrom": float(norm.max())}
 
 
+def wall_depths(edges, n, rng, mode='band', step_width=None):
+    if mode not in ('band','legacy'):raise MastercapError('Wall clamp must be band or legacy')
+    if mode=='legacy':return None, {'mode':mode,'band_inner':.002,'band_outer':.002,'clamp_events':0}
+    bands=[step_width if step_width and step_width>0 else min(float(width),2.) for width in (edges[1]-edges[0],edges[-1]-edges[-2])]
+    depths=[band*np.sqrt(rng.random(n)) if step_width and step_width>0 else
+            min(.002,band)+rng.random(n)*(band-min(.002,band)) for band in bands]
+    return depths,{'mode':mode,'band_inner':bands[0],'band_outer':bands[1],'clamp_events':0}
+
+
+def wall_clamp_targets(radial, checked_radial, edges, depths):
+    if depths is None:return np.clip(radial,edges[0]+.002,edges[-1]-.002)
+    return np.where(checked_radial<edges[0],edges[0]+depths[0],
+                    np.where(checked_radial>edges[-1],edges[-1]-depths[1],radial))
+
+
 def search(structure, analysis, edges, profiles, center, rng, mode="independent",
            distribution="random", max_iterations=1000, time_limit=300.0, margin=0.0,
            profile_tolerance=None, composition_tolerance=None, progress=None,
@@ -469,7 +489,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
            refine_strength_control="fixed", refine_min_step=0.002, consolidate_target=0.001,
            reconsolidate_below=0.7, reconsolidate_every=10, reconsolidate_iterations=3,
            refine_selection="crossing", sulfur_residue_placement="off", consolidate_noncontact_slack="on",
-           sulfur_anchor_tolerance=1.5, sulfur_anchor_spring=True, target_model="reference", original_profiles=None):
+           sulfur_anchor_tolerance=1.5, sulfur_anchor_spring=True, target_model="reference", original_profiles=None, wall_clamp="band", step_edge_width=None,
+           refine_drift_step="auto", refine_transport_factor=2.0, bin_width=None, refine_transport_routing="cumulative"):
     if target_model not in ("reference", "step"):
         raise MastercapError("Target model must be reference or step")
     if target_model == "step" and sulfur_residue_placement == "reference":
@@ -499,13 +520,24 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         raise MastercapError("Strength control must be fixed, gain or acceptance")
     if refine_selection not in ("crossing", "mismatch"):
         raise MastercapError("Refinement selection must be crossing or mismatch")
+    if refine_transport_routing not in ("local","cumulative"):
+        raise MastercapError("Transport routing must be local or cumulative")
     if sulfur_residue_placement not in ("off", "profile", "reference"):
         raise MastercapError("Sulfur residue placement must be off, profile or reference")
     if consolidate_noncontact_slack not in ("on", "off"):
         raise MastercapError("Noncontact consolidation slack must be on or off")
+    bin_width = float(np.mean(np.diff(edges))) if bin_width is None else bin_width
+    drift_step=resolve_drift_step(refine_drift_step,bin_width,refine_min_step,refine_max_step)
+    patience=effective_patience(refine_patience,bin_width,drift_step) if refine_selection=='crossing' else refine_patience
+    if not np.isfinite(refine_transport_factor) or refine_transport_factor<=0:
+        raise MastercapError('Refine transport factor must be positive')
     if stage_progress:
         stage_progress("Building inventory metadata and initializing particle coordinates")
-    metadata = GeometryMetadata.build(structure, analysis.limits, enforce_covalent_floor=True)
+    inter_residue_configuration(analysis,margin)
+    metadata = GeometryMetadata.build(structure, analysis.limits, enforce_covalent_floor=True,
+                                      inter_residue_limits=getattr(analysis,'inter_residue',None),
+                                      inter_residue_scale=getattr(analysis,'inter_scale',1.),
+                                      overridden_pairs=[r['pair'] for r in getattr(analysis,'distance_limit_overrides',[])])
     def measure_slack(local):
         return slack_summary(local, metadata, margin, mode, slack=refine_slack)
 
@@ -513,6 +545,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     anchors = SulfurAnchors()
     rotations = initialize(structure, analysis, edges, profiles, center, rng, mode, distribution, groups=groups,
                            sulfur_residue_placement=sulfur_residue_placement, sulfur_anchors=anchors)
+    depths,wall_report=wall_depths(edges,len(structure.atoms),rng,wall_clamp,step_edge_width if target_model=="step" else None)
     anchor_bins = (anchors.indices, radial_bins(anchors.radii, edges)) if len(anchors.indices) else None
     sulfur_initial_error = sulfur_first_error = None
     sulfur_first_observations = None
@@ -531,6 +564,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         quantiles[e] = profile_quantiles(profile, edges, len(indices))
     best, best_key = None, (float("inf"),)*4
     first_feasible = None
+    first_layering = None
     phase = "repair"
     consolidation_steps = consolidation_failures = 0
     slack_first = slack_after = None
@@ -599,6 +633,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             feasible_iterations.append(iteration)
             if first_feasible is None:
                 first_feasible = iteration
+                first_layering=radial_layering(np.linalg.norm(candidate.xyz-center,axis=1),edges)
                 sulfur_first_error = metrics["elements"].get("S", {}).get("profile_error")
                 sulfur_first_observations = anchors.observations(candidate.xyz, center, edges)
                 total_disconnected = sum(r['disconnected_residues'] for r in repair_history)
@@ -630,7 +665,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         if (phase == "refine" and geometry["mandatory_pass"] and not rolled_back
                 and reconsolidate_iterations and since_consolidation >= 2 and consolidation_failures <= 3
                 and profile_updates < refine_updates and not controller.stalled and status != "valid"
-                and not (refine_patience and profile_updates-last_improvement_update >= refine_patience)
+                and not (refine_patience and profile_updates-last_improvement_update >= patience)
                 and iteration < max_iterations and time.monotonic()-started < time_limit
                 and push_history and not push_history[-1].get("rollback")):
             trigger = ("low_acceptance" if reconsolidate_below and push_history[-1].get("acceptance_fraction", 1) < reconsolidate_below
@@ -697,8 +732,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             logging.getLogger(__name__).warning("Refinement blocked: damage did not decrease with push strength "
                                f"(strength {evidence['first_strength']:g}->{evidence['last_strength']:g}, "
                                f"damage {evidence['first_damage']}->{evidence['last_damage']}); check neighbor forces/slack")
-        elif controller.stalled or (first_feasible is not None and refine_patience > 0
-                                    and profile_updates-last_improvement_update >= refine_patience):
+        elif controller.stalled or (first_feasible is not None and patience > 0
+                                    and profile_updates-last_improvement_update >= patience):
             reason = "refinement_stalled"
             stop_limit = "strength_floor" if controller.stalled else "refine_patience"
         elif time.monotonic()-started >= time_limit:
@@ -777,7 +812,12 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             anchor_nonzero_updates += outside_interval > 0
             anchor_force_sum += float(np.abs(wanted).mean())
             anchor_force_max = max(anchor_force_max, float(np.abs(wanted).max()))
-        clipped = np.clip(radial, edges[0]+0.002, edges[-1]-0.002)
+        # Use the same rounded positions as mandatory geometry for band masks.
+        checked_radial=np.linalg.norm(candidate.xyz-center,axis=1) if depths is not None else radial
+        clipped=wall_clamp_targets(radial,checked_radial,edges,depths)
+        if depths is not None and first_feasible is None and sulfur_anchor_spring:
+            clipped[anchors.indices]=radial[anchors.indices]
+        clamp_events=int(np.count_nonzero(clipped!=radial))
         pieces["radial_clip"][:] = (clipped-radial)[:, None]*direction*0.8
         pieces["centering"][:] = (center-structure.xyz.mean(axis=0))*0.1
         force = sum(pieces.values())
@@ -793,7 +833,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             if refine_selection == "crossing":
                 details, selected = apply_crossing_push(push_force, push_radial, push_direction, metadata.element_indices,
                                                        profiles, edges, controller.strength, refine_max_step,
-                                                       refine_fraction, refine_min_step, previous_undone, anchor_bins=anchor_bins)
+                                                       refine_fraction, refine_min_step, previous_undone, anchor_bins=anchor_bins,
+                                                       drift_step="legacy" if drift_step is None else drift_step, transport_factor=refine_transport_factor,routing=refine_transport_routing)
             else:
                 details, selected = apply_radial_push(push_force, push_radial, push_direction, metadata.element_indices, quantiles,
                                                       controller.strength, refine_max_step, refine_fraction, refine_min_step)
@@ -814,7 +855,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                 update_positions(trial, push_force, groups, mode)
                 accepted, checked, previous_undone = accept_trial(candidate.xyz, trial.xyz, local, metadata, center, edges,
                                                                  margin, mode, refine_max_step, selected_indices=selected,
-                                                                 return_undone=True, anchor_bins=anchor_bins)
+                                                                 return_undone=True, anchor_bins=anchor_bins,
+                                                                 backtrack=drift_step is not None and refine_selection=="crossing" and refine_transport_routing=="cumulative")
                 for e, values in checked.pop("per_element").items():
                     details["per_element"].setdefault(e, {}).update(values)
                 crossings = crossing_metrics(push_radial, np.linalg.norm(accepted-center, axis=1),
@@ -822,7 +864,14 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                 for e, values in crossings.items():
                     details["per_element"].setdefault(e, {}).update(values)
                 details.update(checked)
+                details['bin_crossings']=sum(v['bin_crossings'] for v in crossings.values())
+                details['crossings_improved']=sum(v['crossings_improved'] for v in crossings.values())
+                if drift_step is not None and details['crossings_improved']>0:
+                    last_improvement_update=profile_updates+1
                 details["actual_move"] = force_summary(accepted-candidate.xyz)
+                movement=np.linalg.norm(accepted-candidate.xyz,axis=1)
+                details['mean_actual_move_per_proposal_angstrom']=float(movement.sum()/details['atoms_proposed']) if details['atoms_proposed'] else 0.
+                details['mean_actual_move_of_movers_angstrom']=float(movement[movement>0].mean()) if np.any(movement>0) else 0.
                 controller.start(iteration, candidate.xyz, details, candidate_key(metrics, selection_objective))
                 structure.xyz[:] = accepted
             else:
@@ -833,6 +882,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
             if refine_acceptance == "per-atom":
                 del local, force, push_force, pieces
                 continue
+        wall_report['clamp_events']+=clamp_events
         update_positions(structure, force, groups, mode)
         if before_push is not None:
             if anchor_bins is not None:
@@ -857,6 +907,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
     report["termination"] = termination
     report["candidate_available"] = output is not None
     report["first_feasible_iteration"] = first_feasible
+    report["layering_at_first_feasible"]=first_layering
     report["refinement_steps"] = iteration-first_feasible if first_feasible is not None else 0
     report["profile_updates"] = profile_updates
     report["refinement_updates"] = profile_updates
@@ -874,7 +925,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                    "consolidation_completed": consolidation_completed,
                    "consolidation_iterations_total": consolidation_iterations_total,
                    "consolidation_history": consolidation_history,
-                   "stall_cause": classify_stall(push_history, refine_patience) if stop_limit == "refine_patience" else None,
+                   "stall_cause": classify_stall(push_history, patience) if stop_limit == "refine_patience" else None,
                    "consolidation_restarts": min(consolidation_failures, 3),
                    "consolidation_failures": consolidation_failures, "search_phase": phase})
     report.update({"restored_snapshot_iterations": restored_iterations,
@@ -891,7 +942,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
                    "refinement_stop_limit": stop_limit, "last_search_geometry": last_search_geometry,
                    "last_significant_improvement_update": last_improvement_update,
                    "refinement_settings": {"updates": refine_updates, "iteration_cap": refine_iterations,
-                       "patience": refine_patience, "improvement_relative": improvement_relative,
+                       "patience": refine_patience, "effective_patience":patience, "drift_step":refine_drift_step,
+                       "effective_drift_step_angstrom":drift_step, "transport_factor":refine_transport_factor, "transport_routing":("local" if drift_step is None else refine_transport_routing) if refine_selection=="crossing" else "not_applicable", "improvement_relative": improvement_relative,
                        "starting_strength": refine_strength, "minimum_strength": controller.minimum,
                        "maximum_strength": controller.maximum, "fraction": refine_fraction,
                        "max_step_angstrom": refine_max_step, "recovery_limit": refine_recovery_limit,
@@ -928,6 +980,7 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         "repair_anchor_updates": anchor_updates, "spring_updates_after_first_feasible": 0,
         "repair_anchor_mean_requested_move_angstrom": anchor_force_sum/anchor_updates if anchor_updates else 0.0,
         "repair_anchor_max_requested_move_angstrom": anchor_force_max}
+    report["wall_clamp"]=wall_report
     return output, report
 
 

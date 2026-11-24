@@ -23,9 +23,10 @@ class GeometryMetadata:
     element_indices: dict
     groups: dict
     inter_residue_floor: np.ndarray | None = None
+    inter_residue_enabled: bool = False
 
     @classmethod
-    def build(cls, structure, limits, *, enforce_covalent_floor=False):
+    def build(cls, structure, limits, *, enforce_covalent_floor=False, inter_residue_limits=None, inter_residue_scale=1.0, overridden_pairs=()):
         elements, radii, residues = structure.elements, structure.radii, structure.residues
         names, codes = np.unique(elements, return_inverse=True)
         lookup = {str(e): i for i, e in enumerate(names)}
@@ -37,8 +38,24 @@ class GeometryMetadata:
         blocks = np.split(order, np.flatnonzero(np.diff(residues[order]))+1)
         groups = {int(residues[g[0]]): g for g in blocks if len(g)}
         floor = np.array([[covalent_floor(a,b) for b in names] for a in names]) if enforce_covalent_floor else None
+        if inter_residue_limits:
+            floor=np.array([[covalent_floor(a,b) for b in names] for a in names])
+            excluded={tuple(sorted(pair.split('-') if isinstance(pair,str) else pair)) for pair in overridden_pairs}
+            for (a,b),value in inter_residue_limits.items():
+                if (a,b) in excluded or a not in lookup or b not in lookup:continue
+                i,j=lookup[a],lookup[b]
+                floor[i,j]=floor[j,i]=max(floor[i,j],inter_residue_scale*value)
         return cls(elements, radii, residues, codes, matrix,
-                   {str(e): np.flatnonzero(elements == e) for e in names}, groups, floor)
+                   {str(e): np.flatnonzero(elements == e) for e in names}, groups, floor, bool(inter_residue_limits))
+
+    @property
+    def inter_residue_lower(self):
+        return self.inter_residue_floor
+
+    def effective_limits(self):
+        names=sorted(self.element_indices)
+        matrix=self.lower_matrix if self.inter_residue_lower is None else np.maximum(self.lower_matrix,self.inter_residue_lower)
+        return {(a,b):float(matrix[i,j]) for i,a in enumerate(names) for j,b in enumerate(names) if i<=j}
 
     def pair_lower_bounds(self, pairs):
         lower = self.lower_matrix[self.codes[pairs[:,0]],self.codes[pairs[:,1]]]
@@ -139,7 +156,7 @@ def local_geometry(structure, limits, margin=0.0, mode="independent", *, metadat
     # A rare element can have a large inferred separation. Do not use that
     # radius for ALL atoms: query only the affected element pairs.
     extra = []
-    for (a, b), bound in limits.items():
+    for (a, b), bound in metadata.effective_limits().items():
         if bound <= maximum:
             continue
         ai = metadata.element_indices.get(a, np.array([], dtype=int))
@@ -239,7 +256,7 @@ def acceptance(geometry, metrics, profile_tolerance, composition_tolerance):
     return "valid" if soft_pass else "approximate"
 
 
-def pair_distance_audit(structure, limits):
+def pair_distance_audit(structure, limits, *, inter_residue_limits=None):
     """Independent inter-residue minima and distance counts, using fresh trees."""
     from itertools import combinations_with_replacement
     from .model import covalent_floor
@@ -285,7 +302,7 @@ def pair_distance_audit(structure, limits):
                 break
             pending = pending[~eligible.any(axis=1)]
             k = min(len(bi), 2*k)
-        limit = limits.get((a,b), 0.0)
+        limit = (inter_residue_limits if inter_residue_limits is not None else limits).get((a,b), 0.0)
         floor = covalent_floor(a,b)
         near = trees[a].sparse_distance_matrix(trees[b], max(limit,floor), output_type='coo_matrix')
         left, right = ai[near.row], bi[near.col]
@@ -323,3 +340,23 @@ def require_pair_distance_audit(audit):
                                for a in sample['atoms'])
             cause = 'covalent floor' if record['below_covalent_floor_examples'] else 'distance limit'
             raise MastercapError(f"Final pair distance audit failed: {pair} {sample['distance_angstrom']:.3f} A below {cause}; {atoms}")
+
+
+def inter_residue_configuration(analysis, margin=0., warn=None):
+    """Effective bounds and contact windows, independent of calibration targets."""
+    raw=getattr(analysis,'inter_residue',{})
+    if not raw:return None,{'mode':'off','scale':1.,'matrix':{},'windows':{},'reference_statistics':{}}
+    metadata=GeometryMetadata.build(analysis.structure,analysis.limits,enforce_covalent_floor=True,
+                                    inter_residue_limits=raw,inter_residue_scale=analysis.inter_scale,
+                                    overridden_pairs=[r['pair'] for r in analysis.distance_limit_overrides])
+    from .model import VDW
+    effective=metadata.effective_limits()
+    windows={'-'.join(pair):sum(VDW[e] for e in pair)-margin-.003-lower for pair,lower in effective.items()}
+    narrow=[f'{pair}={window:.4g} A' for pair,window in windows.items() if window<.05]
+    if narrow and warn:warn('Narrow inter-residue contact windows (<0.05 A): '+', '.join(narrow))
+    cno=[window for pair,window in windows.items() if set(pair.split('-'))<=set('CNO')]
+    if not cno or max(cno)<=0:
+        raise MastercapError('No positive C/N/O inter-residue contact window; connectivity between residues is impossible')
+    return effective,{'mode':'reference','scale':analysis.inter_scale,
+                      'matrix':{'-'.join(pair):value for pair,value in effective.items()},'windows':windows,
+                      'reference_statistics':analysis.inter_statistics}

@@ -1,6 +1,6 @@
 # mastercap
 
-**Current version: 0.1.11**
+**Current version: 0.1.12**
 
 Reference-driven generation of spherical geometric capsid particles in Python.
 Particles derive radial element targets and residue composition from an
@@ -8,11 +8,11 @@ Particles derive radial element targets and residue composition from an
 step-profile control wall. They are for geometry and
 visualization, not chemically valid protein design or molecular dynamics.
 
-Version 0.1.11 adds optional moment-matched homogeneous step targets for analyze,
-generate, calibrate and saved-report validation. The reference-shaped target
-remains the default. Step edges have analytic linear ramps; step calibration uses
-the counting floor, with matching target settings required when loading tolerances.
-Without supplied tolerances, generation remains uncalibrated.
+Version 0.1.12 adds packing/wall/layering diagnostics, a seeded wall-band clamp,
+faster quota-limited edge transport at fine radial bins, and optional scaled
+non-bonded inter-residue distance floors. The reference/step targets and
+calibration definitions are unchanged. Use `--wall-clamp legacy
+--refine-drift-step legacy` for the earlier search behavior.
 
 **Status:** geometric prototype with synthetic regression tests, complete 1CWP
 benchmarks and reference-resampling calibration. Independent experimental
@@ -794,6 +794,147 @@ respectively, with first feasibility at iterations 57 and 49. Timings include
 concurrent development workload and are not isolated speed measurements.
 Detailed fits, floors, errors, runtimes and audit evidence are recorded under
 `step_profile` in [the benchmark report](benchmarks/1cwp_refinement.json).
+
+## FEM-oriented packing diagnostics and fine-bin transport
+
+The intended FEM mesh marks a cell solid when it intersects an atom's vdW sphere.
+At 0.5 Å resolution, atom-scale artifacts affect the solid geometry. Earlier user
+pilots reported wall populations of 267/532 atoms within 0.01 Å, an outer 0.5 Å
+shell density of 0.0111 versus a ramp target of 0.0021, and about 0.59 nonbonded
+inter-residue contacts per atom below 2 Å versus zero for 1CWP. Their 1 Å profile
+error barely changed over 50 pushes (0.0302 to 0.0299). These motivated this
+revision; they are prior pilot observations, not results of the new defaults.
+
+Every `generate` and `validate` report now contains `diagnostics`, including a
+reference summary cached once on its `Analysis`. Validation can measure old
+particles with their existing matching reports, without regeneration. Diagnostics
+**never set quality status or change acceptance thresholds**:
+
+- `contacts`: `2 * pair_count / N` for positive overlaps and for positive gaps
+  below `sqrt(3)*h`, separately for each `--mesh-element-sizes` value (default
+  `0.5,1.0` Å). Thresholds are recorded: 0.866 and 1.732 Å. This estimates
+  *potential* mesh bridging, not exact voxel occupancy for a particular grid.
+- `inter_residue`: close-contact rates below 2 and 2.5 Å and per-element-pair
+  nearest-neighbor p01/p50. Whole residue pairs joined by an observed backbone
+  C--N distance below 1.6 Å are excluded. The peptide-pair count divided by the
+  residue count is also reported; inference uses geometry, not chain numbering.
+- `residue_drift`: median/p95 observed rigid-fit RMSD, reusing generated residue
+  transforms. Old reports missing transforms give null values, not a fabricated
+  zero. Reference drift is zero by definition.
+- `walls`: atom counts within 0.01, 0.1 and 0.5 Å; eight inward 0.5 Å density
+  shells per wall; expected target densities; first-shell excess; and expected
+  counts within 0.1 Å (also 0.01 Å for the terminal summary). Step expectations
+  use the analytic ramp; reference targets use the bin density at each midpoint.
+  Reference-only wall expectations are null, since no target is imposed on it.
+- `layering`: 1 Å shell density divided by its 9-shell moving average, retaining
+  the valid interior, with relative SD, extrema and shell count. Step targets
+  also report plateau density/target relative SD, at least 6 Å from support walls.
+  Too few shells or no density support gives null, not a zero layering claim.
+
+Pairs are queried once at `2*max(vdW)+sqrt(3)*max(h)` and processed in blocks of
+2 million to limit temporary arrays. The pair list itself still scales with the
+number of local contacts. Exact nonbonded nearest statistics use separate
+per-element trees. These diagnostics add analysis/export time, not repair time.
+Across an R × thickness grid, compare these same measurements with the reference
+and with each other to quantify how consistently the approximation is held.
+They do not reconstruct the user's exact voxel mesher. Matching a 1 Å bin
+average does not guarantee the continuous ramp inside that bin; the 0.5 Å wall
+measurements expose this remaining discretization effect.
+
+### Seeded wall-band clamp
+
+`--wall-clamp band` is the new default. Fixed inward depths are drawn once per
+atom and wall. A step ramp of width w uses `w*sqrt(U)`; hard steps and reference
+targets use a uniform depth from 0.002 Å to the smaller of 2 Å and the wall bin
+width. Only out-of-support atoms receive the 0.8 radial correction. The band mask
+uses PDB-rounded positions, so raw positions that round outside cannot remain
+stuck indefinitely. During repair, anchored sulfur keeps its existing spring
+instead of receiving a conflicting random band target. Refinement continues to
+reject out-of-bounds moves. `search.wall_clamp` and top-level `wall_clamp` record
+mode, band widths and atom-iteration clamp events.
+
+`--wall-clamp legacy` retains the original clipped targets at wall ±0.002 Å and
+consumes no extra random draws. It is useful for a controlled comparison.
+
+### Edge-directed transport at 1 Å bins
+
+The previous drift was `strength * distance`, typically 0.0025 Å at 1 Å bins.
+An atom 0.5 Å from an edge needed about 200 pushes, exhausting patience before
+its bin count could change. `--refine-drift-step auto` now uses
+`max(min_step, min(max_step, 0.02*bin_width))`: 0.02 Å at 1 Å bins, capped at
+0.05 Å with the default maximum. A positive numeric value selects a fixed speed
+no larger than `--refine-max-step`. The actual request is limited by the distance
+to the edge plus the 0.002 Å crossing margin.
+
+Per edge and direction, at most `ceil(--refine-transport-factor * remaining_quota)`
+atoms drift (factor default 2). The per-element fraction cap still applies;
+nearest-to-edge ordering keeps transit deterministic. The new transport uses the
+**cumulative count imbalance** on each side of an edge, allowing material to
+travel through balanced bins toward a distant deficit. Restricting transport to
+immediately adjacent surplus/deficit pairs left most remaining error unreachable:
+a direct implementation trial retained 1,835 surplus C atoms but only 4.5 atoms
+of adjacent transfer quota. This routing addition was needed to pursue the
+specified fine-bin acceptance targets. Accepted useful crossings
+reset patience even when their improvement is below the usual 0.1% threshold.
+For crossing selection, effective patience is at least twice the estimated
+half-bin transit time: 50 pushes at 1 Å with auto drift. Explicit patience 0
+still disables that stop. `refinement_settings.effective_patience` records the
+resolved value. Mismatch selection retains its earlier patience behavior.
+
+Push records include drift/crossing proposals, actual crossings, useful
+crossings, requested/actual motion and mean initial distance to the chosen edge.
+`transport_starved` distinguishes a no-crossing window with drift proposals from
+rounding stalls. `--refine-drift-step legacy` restores the old speed, quotas and
+patience, including when combined with `--wall-clamp legacy` for seed regression.
+For independent crossing refinement, a conflicting trial can be halved toward
+its snapshot in up to four checked rounds before rejection. Lower-distance,
+contact, wall and sulfur-bin guards are unchanged; failed residual trials still
+revert. Rigid mode does not interpolate coordinates. Push records distinguish
+backtracked/accepted atoms, attempted guard reasons, final undone reasons and
+actual motion. This bounded backtracking addition addresses the rejection rate
+seen with faster drift; it is disabled by legacy drift. `actual_move` retains
+its all-atom mean; the extra per-proposal and moving-atom means make denominators
+explicit. Mandatory geometry and final audits remain active.
+
+### Optional nonbonded inter-residue floors
+
+`--inter-residue-limits off` is the default. To scan reference-derived floors:
+
+```bash
+mastercap generate --input ./1cwp_full.vdb --output-prefix results/packing_scan \
+  --step-profile --bin-width 1 --mode independent --distribution regular \
+  --sulfur-residue-placement profile --pair-limit-override S-S=3.0 \
+  --inter-residue-limits reference --inter-residue-scale 0.6 \
+  --wall-clamp band --refine-drift-step auto --refine-updates 50 \
+  --seed 42 --time-limit 3600 --max-iterations 3000 --allow-approximate
+```
+
+The statistic is each atom's nearest partner of the relevant element in a
+*different, nonbonded residue*, symmetrized over element pairs. Reference residue
+pairs joined by backbone C--N <1.6 Å or S--S <2.3 Å are excluded. The requested
+nearest-neighbor percentile and grouped fallback settings are reused; this is
+not the percentile of all pairs within 4 Å. Counts, p1/p50/p99 and fallbacks are
+recorded under `analysis.inter_residue_limits`.
+
+For different residues, the lower bound is the maximum of the usual element
+limit, the covalent floor, and `scale * reference_nonbonded_limit`. Within a
+residue the earlier element limit remains. Pairs in `--pair-limit-override`
+retain their selected limit and covalent floor, without the extra nonbonded
+term. `--inter-residue-scale` defaults to 1 when enabled and is rejected without
+`--inter-residue-limits reference`. Repair, component-contact selection, trial
+acceptance, consolidation and final audits use the same effective bounds.
+`inter_residue_limits` records mode, scale, effective matrix, contact windows and
+reference statistics. Standalone validation rebuilds saved settings; missing old
+settings mean off.
+
+A window is `vdW_sum - overlap_margin - 0.003 - effective_lower`. Windows below
+0.05 Å warn; if no C/N/O pair has a positive window, search fails immediately.
+Reference-derived floors can make dense packing unreachable, so do not assume
+that a larger scale is better or feasible. Scan off, 0.6, 0.7, 0.8, 0.9 and 1.0
+in order and stop at the first failed geometry. The production suggestion is
+the largest feasible scale whose observed repair-search time is within 3× off.
+The controls do not change target profiles, so calibration compatibility keys
+remain unchanged. This version does not improve rigid residue-mode packing.
 
 ## Calibration
 
