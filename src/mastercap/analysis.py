@@ -294,10 +294,34 @@ def target_on_edges(target, new_edges):
     return {e: value/volumes for e, value in counts.items()}
 
 
-def held_out_target(target):
+def held_out_target(target, fraction=0.5):
     from .radial import offset_edges
-    edges = offset_edges(target.edges, 0.5)
+    edges = offset_edges(target.edges, fraction)
     return edges, target_on_edges(target, edges)
+
+
+@dataclass
+class Partition:
+    fraction: float
+    edges: np.ndarray
+    profiles: dict
+
+
+def dither_partitions(target, k):
+    """Exact fixed offset targets, constructed once; fraction zero is untouched."""
+    if isinstance(k, (bool, np.bool_)) or not isinstance(k, (int, np.integer)) or k < 1:
+        raise MastercapError('Refine bin dither must be an integer >= 1')
+    totals = {e: float(np.sum(p*shell_volumes(target.edges))) for e,p in target.profiles.items()}
+    partitions = [Partition(0., target.edges, target.profiles)]
+    for i in range(1, k):
+        fraction = i/k
+        edges, profiles = held_out_target(target, fraction)
+        for e, expected in totals.items():
+            actual = float(np.sum(profiles[e]*shell_volumes(edges)))
+            if not np.isfinite(actual) or abs(actual-expected) > 1e-9*abs(expected):
+                raise MastercapError(f'Dither partition {fraction:g} changes the {e} target total: {actual:g} vs {expected:g}')
+        partitions.append(Partition(fraction, edges, profiles))
+    return partitions
 
 
 def build_target(analysis, inner=None, outer=None, *, step=False, edge_width=4.0, bin_width=None):

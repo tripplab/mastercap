@@ -511,3 +511,66 @@ and backtracking can bias acceptance. Tests are supplied for seeded endpoints,
 legacy behavior, edge ratios, continuous/piecewise count conservation, held-out
 sheet detection, larger neighbor reach and old-report validation. Per the
 revision's execution constraint, neither these tests nor benchmarks were run.
+
+## Revision 09: fixed offset partitions and wall-biased transport
+
+v0.1.14 is implementation only. The motivating run8 observation was correct
+generation-bin ramp counts with 2.5–3× density excess in the outermost 0.5–1 Å
+and depletion 3–4 Å inward. It is supplied evidence from v0.1.13, not a result
+measured in this revision. No tests are authored, edited or executed here, and
+no application runs, compilation checks or benchmarks are performed.
+
+dither_partitions constructs K immutable-in-use Partition records once at search
+start, with fractions i/K. Zero reuses the generation arrays; nonzero fractions
+use offset_edges and target_on_edges, retaining partial wall bins. Per-element
+integrated counts must agree within 1e-9 relative. The continuous step and
+piecewise reference target definitions are unchanged. Default K=1 follows the
+v0.1.13 transport/ranking path without extra RNG draws; added measurements can
+still affect how far a time-limited run gets on a particular machine.
+
+Push p, counting attempts rather than accepted moves, uses partition p mod K
+for crossing selection and crossing metrics. Mismatch quantiles also follow the
+active partition. The nominal generation width controls speed, landing depth
+and patience, while individual destination widths cap landing penetration.
+anchor_edges isolates the anchor check from transport edges: anchor membership,
+accept_trial, restore_anchor_bins and all geometry/audits retain generation edges.
+
+For K>1, metrics.dithered holds the arithmetic mean of per-partition errors,
+element means, fractions and per-partition totals. Candidate keys substitute
+these total/mean/max element values in the existing objective order, preserving
+composition terms. Both best-candidate selection and significant-improvement
+patience use that key. The accepted useful-crossings exception is retained.
+Own-bin error remains reported and remains the only tolerance measure; an
+own-bin tolerance pass can still stop the search immediately. Calibration code
+and settings compatibility are unchanged. The report states ranking_measure.
+
+Wall-first is a separate opt-in crossing selector. For each surplus wall bin
+with positive inward routing quota, nearest-wall atoms are reserved before the
+normal loops, at most ceil(transport_factor*quota) within remaining capacity.
+They move by the fixed drift speed, or distance to the interior edge plus the
+existing landing offset when reachable. Requested crossings update balances;
+reserved atoms are not selected again. Flags track wall proposals separately
+from normal crossings and drifters, including post-selection anchor rejection.
+Acceptance, neighbor envelopes and backtracking retain their existing rules.
+The rule requires auto/numeric fixed-speed drift; legacy strength-scaled drift
+has no defined fixed speed and is rejected with wall-first. Legacy landing is
+supported. Existing clamp forces are untouched; split repair/refinement counters
+sum to the previous total and count only applied clamp contributions.
+
+Both held-out blocks carry offset_fraction and used_in_ranking. Offset 0.5 is
+part of the dithered mean exactly when K>1 is even; it must not then be called
+independent. Offset 1/(2K) is never a training partition, and supplies the
+held_out_independent block and scalar trace/checkpoint value. For K=1 the
+half-bin result is reused, avoiding a duplicate histogram. When the half-bin
+partition is in the training set, its already computed measurements are reused.
+Checkpoints take all measures from the same retained candidate. Validation
+rebuilds partitions from saved configuration, using K=1 for older reports.
+
+contact_zone uses each wall's nearest min(5 Å, support thickness), divided into
+0.25 Å shells. Expected counts come from exact target_on_edges integrals, never
+midpoint interpolation of generation counts. Zone error is volume-weighted
+absolute density error divided by expected zone count. The 0.5 Å excess is a
+count ratio; slopes are unweighted least-squares density-versus-radius slopes.
+Zero counts and numerically flat expected slopes produce null ratios. Reference
+diagnostics without an imposed target have contact_zone=null. These diagnostics
+do not affect ranking or status and do not reproduce a particular voxel mesher.

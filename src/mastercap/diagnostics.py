@@ -8,6 +8,48 @@ from .radial import shell_volumes
 CHUNK = 2_000_000
 
 
+def contact_zone(radial, target, zone=5.0, shell=0.25):
+    """Atom-centre densities next to each support wall, with exact target integrals."""
+    from .analysis import target_on_edges
+    if not np.isfinite([zone, shell]).all() or min(zone, shell) <= 0:
+        raise MastercapError('Contact-zone depth and shell width must be finite and positive')
+    radial = np.asarray(radial)
+    length = min(zone, target.edges[-1]-target.edges[0])
+    if length <= 0:
+        raise MastercapError('Contact zone requires a positive target support width')
+    depths = np.r_[np.arange(0., length, shell), length]
+    result = {}
+    for wall in ('inner', 'outer'):
+        edges = target.edges[0]+depths if wall == 'inner' else target.edges[-1]-depths[::-1]
+        edges = np.clip(edges,target.edges[0],target.edges[-1])
+        volumes = shell_volumes(edges)
+        observed = np.histogram(radial, edges)[0]/volumes
+        expected = sum(target_on_edges(target, edges).values())
+        expected_count = float(np.sum(expected*volumes))
+        ratios = [float(a/b) if b > 0 else None for a,b in zip(observed,expected)]
+        near_depth = min(0.5, length)
+        near_edges = np.array([target.edges[0], target.edges[0]+near_depth] if wall == 'inner'
+                              else [target.edges[-1]-near_depth, target.edges[-1]])
+        near_edges = np.clip(near_edges,target.edges[0],target.edges[-1])
+        near_expected = float(np.sum(sum(target_on_edges(target, near_edges).values())*shell_volumes(near_edges)))
+        near_observed = int(np.histogram(radial, near_edges)[0].sum())
+        mids = (edges[:-1]+edges[1:])/2
+        slope_ratio = None
+        if len(mids) > 1:
+            x = mids-mids.mean()
+            denominator = float(np.dot(x,x))
+            slope = float(np.dot(x,expected-expected.mean())/denominator)
+            scale = max(float(np.max(np.abs(expected))), np.finfo(float).tiny)/length
+            if abs(slope) > 1e-12*scale:
+                slope_ratio = float(np.dot(x,observed-observed.mean())/denominator/slope)
+        result[wall] = {'shells_angstrom': edges.tolist(), 'observed': observed.tolist(),
+            'expected': expected.tolist(), 'ratio': ratios,
+            'zone_error': float(np.sum(np.abs(observed-expected)*volumes)/expected_count) if expected_count else None,
+            'wall_excess_0p5': near_observed/near_expected if near_expected else None,
+            'slope_ratio': slope_ratio}
+    return result
+
+
 def edge_concentration(radial, edges, thresholds=(0.002, 0.005, 0.01)):
     """Measure interior-edge sheets; support walls never count as edges here."""
     radial, edges = np.asarray(radial), np.asarray(edges)
@@ -202,5 +244,10 @@ def particle_diagnostics(structure, center, edges, target, step_block=None,
                              'p95_angstrom':float(np.percentile(drift,95)) if drift else None},
             'walls':walls,'layering':layering}
     result['edge_concentration'] = edge_concentration(radial, edges)
+    if target is not None:
+        from .analysis import Target
+        result['contact_zone'] = contact_zone(radial, Target(edges, target, None, step_block))
+    else:
+        result['contact_zone'] = None
     if reference_summary is not None:result['reference']=reference_summary
     return result

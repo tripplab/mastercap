@@ -19,7 +19,7 @@ from .diagnostics import particle_diagnostics, mesh_sizes
 from .refinement import resolve_drift_step, resolve_landing_depth
 from .constraints import GeometryMetadata, inter_residue_configuration
 from .analysis import (analyze, build_target, distance_statistics, parse_limit_override,
-                       resolve_limit_overrides, held_out_target)
+                       resolve_limit_overrides, held_out_target, dither_partitions)
 from .constraints import (acceptance, profile_metrics, validate_geometry,
                           connectivity_audit, require_connectivity_audit,
                           pair_distance_audit, require_pair_distance_audit)
@@ -42,6 +42,26 @@ def log_profile_errors(metrics):
                         for e,v in metrics['elements'].items())
         LOG.info('Final normalized profile errors: %s; held-out (half-bin offset): %s, total=%s',
                  own, values, f"{held['total_profile_error']:.6f}" if held['total_profile_error'] is not None else 'n/a')
+        if held.get('used_in_ranking'):
+            LOG.info('Half-bin held-out is a ranking partition here; use independent held-out for comparison')
+    independent = metrics.get('held_out_independent')
+    if independent:
+        LOG.info('Independent held-out profile error (offset %.6g; never ranked): total=%s',
+                 independent['offset_fraction'], independent['total_profile_error'])
+    dithered = metrics.get('dithered')
+    if dithered:
+        LOG.info('Dithered mean profile error (%d partitions): total=%.6f, %s',
+                 dithered['k'], dithered['total_profile_error'],
+                 ', '.join(f'{e}={v:.6f}' for e,v in dithered['elements'].items()))
+
+
+def final_profile_metrics(structure, center, target, k=1):
+    partitions = dither_partitions(target,k)
+    held = held_out_target(target)
+    independent = held if k == 1 else held_out_target(target,1/(2*k))
+    return profile_metrics(structure, center, target.edges, target.profiles, target.reference_on_edges,
+                           held_out=held, held_out_independent=independent,
+                           partitions=partitions if k > 1 else None)
 
 
 class PairLimitAction(argparse.Action):
@@ -99,7 +119,7 @@ def add_diagnostics(report, structure, analysis, center, target, sizes, transfor
              100*edge['fraction_within']['0.005'], 100*edge['expected_within']['0.005'],
              f'{ratio:.3f}' if ratio is not None else 'n/a')
     if ratio is not None and ratio > 3:
-        LOG.warning('High interior-bin edge concentration: within 0.005 A ratio %.3f exceeds 3; inspect held-out profile error', ratio)
+        LOG.warning('High interior-bin edge concentration: within 0.005 A ratio %.3f exceeds 3; inspect independent held-out profile error', ratio)
     ref=d['reference'];h=str(min(sizes));threshold=d['contacts']['gap_threshold_angstrom'][h]
     def number(value):return f'{value:.4g}' if value is not None else 'n/a'
     LOG.info('Diagnostics: overlap/atom %s (ref %s); near-gap<%.3g %s (ref %s); '
@@ -111,6 +131,11 @@ def add_diagnostics(report, structure, analysis, center, target, sizes, transfor
              d['walls']['inner']['atoms_within']['0.01'],d['walls']['outer']['atoms_within']['0.01'],
              number(d['walls']['inner']['expected_within_0p01']),number(d['walls']['outer']['expected_within_0p01']),
              number(d['layering']['relative_sd']),number(d['residue_drift']['median_angstrom']))
+    zone = d['contact_zone']
+    LOG.info('Contact zone: inner zone error %s, outermost 0.5 A x%s, slope ratio %s; '
+             'outer zone error %s, outermost 0.5 A x%s, slope ratio %s',
+             number(zone['inner']['zone_error']), number(zone['inner']['wall_excess_0p5']), number(zone['inner']['slope_ratio']),
+             number(zone['outer']['zone_error']), number(zone['outer']['wall_excess_0p5']), number(zone['outer']['slope_ratio']))
 
 
 class ProfileToleranceAction(argparse.Action):
@@ -269,6 +294,8 @@ Workflow and defaults:
   Either budget set to 0 restores first-feasible stopping. Time/max-iteration
   limits still apply. --selection-objective total ranks atom-weighted error
   first; worst-element restores the previous worst-element-first ranking.
+  With --refine-bin-dither N>1, those keys use the mean of the N partitions;
+  acceptance and tolerances continue to use the original own-bin errors.
   --refine-selection crossing (default) targets surplus-to-deficit adjacent-bin
   crossings, then drifts atoms toward useful edges. mismatch keeps rank matching.
   At most 0.2 of each element is selected per crossing/drift push (round down).
@@ -397,16 +424,22 @@ for _command, _example in {
 
 FEM_HELP = """
 PROFILE ERROR MEASURES:
-  Own-bin profile error is optimized and remains the measure for tolerances,
-  acceptance and candidate ranking. Held-out error uses a half-bin-offset
-  partition of the SAME target and is never optimized or used for acceptance.
-  Compare particles using held-out error together with the interior-edge
+  Own-bin error remains the measure for tolerances and acceptance. Ranking and
+  patience use own-bin error by default, or the mean across N offset partitions
+  with --refine-bin-dither N (N=1 is off). Transport cycles through those partitions.
+  Half-bin held-out error (offset 0.5) is part of ranking when N>1 is even;
+  use independent held-out error at offset 1/(2N), which is NEVER ranked.
+  Compare particles using independent held-out error together with the interior-edge
   concentration ratio. Low own-bin error plus a high ratio indicates edge
   bunching; a ratio above 3 within 0.005 A warns but never changes status.
   Random landing spreads crossing endpoints between 0.002 A and the landing
   depth inside the destination bin. Crossings may move max-step + landing-depth;
   these larger trials retain all geometry/anchor/contact checks and backtracking.
-  Bin dithering and held-out ranking are not implemented in this revision.
+  Contact zones report atom-centre densities in 0.25 A shells within 5 A of
+  each wall, exact-target error, 0.5 A excess and density slope ratios. The
+  4 A ramp scale and wall excess also affect vdW-sphere meshes; this is not
+  a mesher-equivalent voxel calculation. Diagnostics never change status.
+  Opt-in example: --refine-bin-dither 4 --refine-wall-selection wall-first
 
 FEM-ORIENTED DIAGNOSTICS:
   Reports compare particle and reference sphere overlaps, near gaps, non-bonded
@@ -568,7 +601,7 @@ def parser():
             command.add_argument("--time-limit", type=finite_positive, default=300.0, help="Cooperative repair-search budget in seconds, shared with fallback; excludes input, analysis, inventory and initialization")
             command.add_argument("--progress-interval", type=positive_integer, default=5, help="Print search progress every this many iterations, plus initial/final progress; --quiet suppresses progress")
             command.add_argument("--refine-iterations", type=nonnegative_integer, default=None, help="Optional cap on all iterations after first feasible geometry, including repair; 0 stops at first feasible geometry")
-            command.add_argument("--selection-objective", choices=("total", "worst-element"), default="total", help="Ranks feasible candidates: total = atom-weighted total profile error (default); worst-element = minimize the worst per-element error first (previous behaviour)")
+            command.add_argument("--selection-objective", choices=("total", "worst-element"), default="total", help="Ranks feasible candidates by total or worst per-element error first; uses own-bin errors by default, partition-mean errors with bin dithering; tolerances remain own-bin")
             command.add_argument("--refine-updates", type=nonnegative_integer, default=50, help="Maximum profile pushes, counting rolled-back pushes too; stops earlier when supplied tolerances pass; 0 stops at first feasible geometry")
             command.add_argument("--refine-patience", type=nonnegative_integer, default=10, help="Stop after this many pushes without a significant relative improvement in the primary selection error (0.1 percent); 0 disables patience stopping")
             command.add_argument("--refine-strength", type=finite_positive, default=0.005, help="Radial strength, fixed by default; gain/acceptance controls adapt up to 4x and stall below 1/16; rollback retains damage feedback")
@@ -582,6 +615,8 @@ def parser():
             command.add_argument('--refine-transport-factor',type=finite_positive,default=2.0,help='Maximum drifters per edge/direction = ceil(factor * remaining quota); legacy drift retains old quotas')
             command.add_argument('--refine-landing',choices=('random','legacy'),default='random',help='Random spreads crossings inside destination bins using the search RNG; legacy preserves distance + 0.002 and consumes no landing draws')
             command.add_argument('--refine-landing-depth',default='auto',help='Landing depth in A: auto=min(0.25*bin width,0.25 A); numeric range [0.002,half configured bin width], capped per destination at half its actual width; crossing moves may reach max step + depth (about 0.30 A at 1 A bins)')
+            command.add_argument('--refine-bin-dither',type=positive_integer,default=1,help='Fixed offset partitions cycled by push; N>1 ranks by their mean profile error; N=1 retains own-bin transport/ranking; tolerances remain own-bin')
+            command.add_argument('--refine-wall-selection',choices=('edge-first','wall-first'),default='edge-first',help='Wall-first moves nearest-wall atoms out of surplus wall bins before normal transport; opt-in, requires crossing selection and auto/numeric drift')
             command.add_argument("--refine-selection", choices=("crossing", "mismatch"), default="crossing", help="Crossing targets useful adjacent-bin crossings, then drifts surplus atoms toward edges; skips previous rejected atoms. Mismatch keeps v0.1.5 rank-matched selection")
             command.add_argument("--refine-max-step", type=finite_positive, default=0.05, help="Crossing candidate reach in A; random landing allows requested crossings up to this + landing depth; legacy/mismatch retain the original move cap; excludes other forces and rigid projection")
             command.add_argument("--refine-fraction", type=positive_fraction, default=0.2, help="Crossing/drift atom budget per element, rounding down; mismatch rounds up and prefers largest radial mismatches; must be in (0, 1]")
@@ -654,6 +689,8 @@ def resolve_target_options(args):
         resolve_drift_step(args.refine_drift_step,args.bin_width,args.refine_min_step,args.refine_max_step)
         if (args.refine_selection == 'crossing' and args.refine_landing == 'random') or args.refine_landing_depth != 'auto':
             resolve_landing_depth(args.refine_landing_depth,args.bin_width)
+        if args.refine_wall_selection == 'wall-first' and (args.refine_selection != 'crossing' or args.refine_drift_step == 'legacy'):
+            raise MastercapError('Wall-first selection requires crossing selection and an auto or numeric refine drift step')
     if not args.step_profile and args.step_edge_width is not None:
         raise MastercapError('--step-edge-width requires --step-profile')
     if args.step_profile and args.smoothing_sigma is not None and args.smoothing_sigma > 0:
@@ -866,6 +903,8 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                                          refine_transport_routing=args.refine_transport_routing,
                                          refine_landing=args.refine_landing,refine_landing_depth=args.refine_landing_depth,
                                          held_out=held_out_target(target),
+                                         refine_bin_dither=args.refine_bin_dither,refine_wall_selection=args.refine_wall_selection,
+                                         target_definition=target,
                                          target_model="step" if target.step else "reference",
                                          original_profiles=target.reference_on_edges, stage_progress=LOG.info)
             except MastercapError:
@@ -943,7 +982,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
         geometry = validate_geometry(reread, center, edges, analysis.limits, args.overlap_margin, mode,metadata=final_metadata(reread,analysis))
         final_connectivity_check(reread, args.overlap_margin, geometry, report)
         final_pair_distance_check(reread, analysis.limits, report,inter_limits)
-        metrics = profile_metrics(reread, center, edges, profiles, target.reference_on_edges, held_out=held_out_target(target))
+        metrics = final_profile_metrics(reread, center, target, args.refine_bin_dither)
         status = acceptance(geometry, metrics, args.profile_tolerance, args.composition_tolerance)
         report.update({"geometry": geometry, "metrics": metrics, "status": status})
         log_acceptance(status, geometry, metrics, args.composition_tolerance)
@@ -1059,7 +1098,7 @@ def validate_command(args, source, started, names):
         publish({path:encode_json(failed)},args.overwrite,[source,args.pdb,args.report])
         LOG.error('Validation failed; audit diagnostic: %s',path)
         raise
-    metrics = profile_metrics(particle, center, edges, profiles, target.reference_on_edges, held_out=held_out_target(target))
+    metrics = final_profile_metrics(particle, center, target, config.get('refine_bin_dither',1))
     log_profile_errors(metrics)
     status = acceptance(geometry, metrics, config["profile_tolerance"], config["composition_tolerance"])
     log_acceptance(status, geometry, metrics, config['composition_tolerance'])
