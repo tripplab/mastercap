@@ -940,6 +940,60 @@ the largest feasible scale whose observed repair-search time is within 3× off.
 The controls do not change target profiles, so calibration compatibility keys
 remain unchanged. This version does not improve rigid residue-mode packing.
 
+### Revision 07 measured results (1CWP, seed 42)
+
+The 1 Å step benchmark used independent atoms, regular distribution, sulfur
+profile placement, S--S=3 Å, 50 pushes and no acceptance tolerances. Its total
+error fell from 0.035806 at first feasible geometry to 0.002683 at push 50
+(**92.5%**), with **85.1%** mean move acceptance. Layering relative SD fell from
+0.02371 to 0.02150. The 4 Å step benchmark reached about 0.00019 total error,
+below the supplied 0.0174 regression bound. Exported structures passed fresh
+connectivity/pair-distance audits and standalone validation; without tolerances
+their status remains `uncalibrated`.
+
+The adjacent-only implementation did not meet the specified 1 Å targets:
+16.5% error reduction and 45.8% mean acceptance. This prompted cumulative
+routing and checked partial moves. These changes have a finite-budget tradeoff
+for the unsmoothed layered target: total error was 0.10187 versus 0.08707 for
+the direct local control. Carbon improved, while nitrogen and oxygen worsened.
+Use the element errors and the explicit routing option when comparing methods;
+these benchmarks do not establish a universal improvement for every target.
+
+The step particle has 7/18 atoms within 0.01 Å of the inner/outer wall, but its
+outermost 0.5 Å shell remains **2.41×** the continuous ramp target. Matching
+1 Å bin averages does not control every sub-bin density or exact voxel geometry.
+Packing diagnostics therefore remain necessary across the full radius/thickness
+grid. The separately measured available v0.1.11 baseline has different
+generation bins and stopping conditions and is labelled accordingly in the
+evidence; it is not an equal-work comparison. The separately rebinned 1 Å and
+4 Å partitions can have nonmatching edges, so a coarser-bin error need not be
+smaller. Their disagreement can expose variation within the generation bins.
+
+The ordered inter-residue scan reached feasible geometry and completed 50 pushes
+for every scale. Search times exclude preparation and diagnostics:
+
+| Scale | First feasible iteration | Search seconds | Total error, 1 Å | Nonbonded <2 Å / atom |
+|---|---:|---:|---:|---:|
+| off | 220 | 470.2 | 0.00268 | 0.5571 |
+| 0.6 | 223 | 534.9 | 0.00282 | 0.4307 |
+| 0.7 | 297 | 682.6 | 0.01297 | 0.0000 |
+| 0.8 | 392 | 721.6 | 0.01501 | 0.0000 |
+| 0.9 | 455 | 851.6 | 0.01822 | 0.0000 |
+| 1.0 | 630 | 1533.7 | 0.02482 | 0.0000 |
+
+**Suggested scale for this benchmark: `--inter-residue-limits reference
+--inter-residue-scale 0.9`.** F=1.0 was feasible but exceeded the measured
+3× off cutoff (1,410.5 s). This recommendation uses geometry and runtime only;
+F=0.9 mean move acceptance was 27.9%, versus 85.1% with limits off, and its
+profile error was higher. The default remains `off`. More capsids, seeds and
+grid points are needed before treating this scale as generally applicable.
+
+The half-bound step pilot completed 50 pushes with 26,814 atoms,
+total 1 Å error 0.00835, and 2/2 atoms within 0.01 Å
+of the inner/outer wall. It also passed standalone validation. Full diagnostics,
+rebinned errors, trajectories and replay settings are recorded under `revision07`
+in [benchmarks/1cwp_refinement.json](benchmarks/1cwp_refinement.json).
+
 ## Calibration
 
 Calibrate one complete reference at the **same bin width, smoothing, model and
