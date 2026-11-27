@@ -52,7 +52,7 @@ def rotated_coordinates(codes,centroids,offsets,rotations):
     return centroids[codes]+np.einsum('nij,nj->ni',rotations[codes],offsets)
 
 
-def resampling_levels(analysis,edges,target,replicates=50,seed=42,progress=None,model="reference"):
+def resampling_levels(analysis,edges,target,replicates=50,seed=42,progress=None,model="reference",resized=False):
     if not isinstance(replicates,int) or replicates<1 or seed<0:
         raise MastercapError('Replicates must be a positive integer and seed nonnegative')
     if model not in ('reference','step'):
@@ -64,18 +64,19 @@ def resampling_levels(analysis,edges,target,replicates=50,seed=42,progress=None,
     def measure(xyz):
         radii=np.linalg.norm(xyz-analysis.center,axis=1)
         return profile_errors({e:radii[ix] for e,ix in indices.items()},edges,target)
-    levels={'self':{e:statistics([v]) for e,v in measure(structure.xyz).items()}}
+    skipped='not defined for resized layered targets'
+    levels={'self':{'skipped':skipped} if resized and model=='reference' else {e:statistics([v]) for e,v in measure(structure.xyz).items()}}
     if progress:progress('self',levels['self'])
     volume=shell_volumes(edges)
     probabilities={e:p*volume/np.sum(p*volume) for e,p in target.items()}
     counting=[]
     for _ in range(replicates):
-        counts={e:rng.multinomial(int(round(np.sum(target[e]*volume))) if model=="step" else len(indices[e]), probabilities[e]) for e in target}
+        counts={e:rng.multinomial(int(round(np.sum(target[e]*volume))) if model=="step" or resized else len(indices[e]), probabilities[e]) for e in target}
         counting.append(errors_from_counts(counts,edges,target))
     levels['counting']=summarize(counting)
     if progress:progress('counting',levels['counting'])
-    if model == 'step':
-        levels.update({name: {'skipped': 'not defined for step targets'} for name in ('orientation','placement')})
+    if model == 'step' or resized:
+        levels.update({name: {'skipped': 'not defined for step targets' if model=='step' else skipped} for name in ('orientation','placement')})
         return levels
     codes,centroids,offsets=residue_frame(structure)
     for level in ('orientation','placement'):
@@ -93,14 +94,18 @@ def resampling_levels(analysis,edges,target,replicates=50,seed=42,progress=None,
 
 
 def profile_settings(analysis,edges,bin_width,radius_method='extrema',percentiles=(.5,99.5), *, model='reference', step_edge_width=None,
-                     curvature_factor=None,thickness_factor=None):
+                     curvature_factor=None,thickness_factor=None,splice_wall_keep=6.0,splice_window=2.0,splice_max_mismatch=0.10):
     return {'reference_hash':analysis.structure.provenance['sha256'],
             'reference_filename':Path(analysis.structure.provenance['path']).name,
             'model':analysis.structure.provenance['model'],'bin_width':float(bin_width),
             'smoothing_sigma':analysis.smoothing_sigma,'inner_radius':float(edges[0]),'outer_radius':float(edges[-1]),
             'edges_count':len(edges),'radius_method':radius_method,'radius_percentiles':list(percentiles),
             'profile_model':model,'step_edge_width':step_edge_width if model=='step' else None,
-            'curvature_factor':curvature_factor,'thickness_factor':thickness_factor}
+            'curvature_factor':curvature_factor,'thickness_factor':thickness_factor,
+            'splice_wall_keep':splice_wall_keep,'splice_window':splice_window,'splice_max_mismatch':splice_max_mismatch,
+            'resized':bool(model=='reference' and not np.allclose([edges[0],edges[-1]],[analysis.inner,analysis.outer],rtol=0,atol=1e-9)),
+            'thickness_method':('splice' if thickness_factor not in (None,1) else
+                                'stretch' if abs((edges[-1]-edges[0])-(analysis.outer-analysis.inner))>1e-9 else 'shift') if model=='reference' else 'plateau'}
 
 
 def check_settings(saved,current):
@@ -108,6 +113,8 @@ def check_settings(saved,current):
             'inner_radius':'inner radius','outer_radius':'outer radius','radius_method':'radius method',
             'radius_percentiles':'radius percentiles','edges_count':'edges count',
             'profile_model':'profile model','step_edge_width':'step edge width'}
+    if saved.get('thickness_method')=='splice' or current.get('thickness_method')=='splice':
+        labels.update(splice_wall_keep='splice wall keep',splice_window='splice window',splice_max_mismatch='splice max mismatch',thickness_method='thickness method')
     saved={'profile_model':'reference','step_edge_width':None,**saved}
     current={'profile_model':'reference','step_edge_width':None,**current}
     differences=[]
@@ -131,7 +138,11 @@ def settings_from_generation(saved):
             'radius_percentiles':options['percentiles'],
             'profile_model':'step' if options.get('step_profile',False) else 'reference',
             'step_edge_width':options.get('step_edge_width',4.0) if options.get('step_profile',False) else None,
-            'curvature_factor':config.get('curvature_factor'),'thickness_factor':config.get('thickness_factor')}
+            'curvature_factor':config.get('curvature_factor'),'thickness_factor':config.get('thickness_factor'),
+            'splice_wall_keep':config.get('splice_wall_keep',6.0),'splice_window':config.get('splice_window',2.0),
+            'splice_max_mismatch':config.get('splice_max_mismatch',0.10),
+            'resized':bool(not options.get('step_profile',False) and not np.allclose([saved['target']['edges'][0],saved['target']['edges'][-1]],[analysis.get('inner_radius',saved['target']['edges'][0]),analysis.get('outer_radius',saved['target']['edges'][-1])],rtol=0,atol=1e-9)),
+            'thickness_method':saved.get('target',{}).get('thickness_method',saved.get('geometry_scaling',{}).get('thickness_method','stretch' if config.get('inner_radius') is not None or config.get('outer_radius') is not None else 'shift'))}
 
 
 def load_tolerances(path,current,elements,warning=None):
@@ -214,13 +225,14 @@ def generated_assessment(path,analysis,edges,target,settings,levels):
     counts=_counts(particle,center,edges,target)
     errors=errors_from_counts(counts,edges,target)
     step = settings.get('profile_model','reference') == 'step'
+    unavailable=step or settings.get('resized',False)
     multiples={level:{e:(error/levels[level][e]['mean'] if 'skipped' not in levels[level] and levels[level][e]['mean']>0 else None)
                       for e,error in errors.items()} for level in ('counting','orientation')}
     gap={};reasons={}
     for e,error in errors.items():
-        if step:
+        if unavailable:
             gap[e]=None
-            reasons[e]='step target: no orientation/placement levels'
+            reasons[e]='step target: no orientation/placement levels' if step else 'resized layered target: no orientation/placement levels'
             continue
         placement,orientation=levels['placement'][e]['mean'],levels['orientation'][e]['mean']
         gap[e]=(placement-error)/(placement-orientation) if placement>orientation else None
@@ -229,9 +241,9 @@ def generated_assessment(path,analysis,edges,target,settings,levels):
             'sibling_report':str(sibling) if sibling.exists() else None,'center':center.tolist(),
             'element_counts':{e:int(np.count_nonzero(particle.elements==e)) for e in target},
             'warnings':particle.warnings,'multiples_counting':multiples['counting'],
-            'multiples_orientation':None if step else multiples['orientation'],'gap_closed':None if step else gap,
-            'gap_closed_clipped':None if step else {e:min(1,v) if v is not None else None for e,v in gap.items()},
-            'undefined_gap_reasons':reasons,'zero_floor_means':[level+':'+e for level in multiples for e,v in multiples[level].items() if v is None and not (step and level=='orientation')]}
+            'multiples_orientation':None if unavailable else multiples['orientation'],'gap_closed':None if unavailable else gap,
+            'gap_closed_clipped':None if unavailable else {e:min(1,v) if v is not None else None for e,v in gap.items()},
+            'undefined_gap_reasons':reasons,'zero_floor_means':[level+':'+e for level in multiples for e,v in multiples[level].items() if v is None and not (unavailable and level=='orientation')]}
 
 
 def round_up_three(value):
@@ -247,6 +259,8 @@ def suggest(levels,compares,multiple=2.0,basis='orientation',statistic='p95', *,
         raise MastercapError('Invalid calibration floor suggestion settings')
     if model=='step' and basis!='counting':
         raise MastercapError('orientation floors are not defined for step targets; use --floor-basis counting')
+    if 'skipped' in levels[basis]:
+        raise MastercapError(f"{basis} floors are {levels[basis]['skipped']}; use --floor-basis counting")
     tolerances={};rules={};formatted={}
     for e,stats in levels[basis].items():
         if e=='Total':continue
@@ -263,7 +277,7 @@ def suggest(levels,compares,multiple=2.0,basis='orientation',statistic='p95', *,
 def calibrate(analysis,edges,target,settings,replicates=50,seed=42,compares=(),generated=(),
               floor_multiple=2.0,floor_basis='orientation',floor_statistic='p95',progress=None):
     model=settings.get('profile_model','reference')
-    levels=resampling_levels(analysis,edges,target,replicates,seed,progress,model=model)
+    levels=resampling_levels(analysis,edges,target,replicates,seed,progress,model=model,resized=settings.get('resized',False))
     comparisons=[]
     for path in compares:
         structure=read_pdb(path,model=settings['model'])
@@ -273,5 +287,5 @@ def calibrate(analysis,edges,target,settings,replicates=50,seed=42,compares=(),g
     return {'settings':{**settings,'replicates':replicates,'seed':seed,'mastercap_version':__version__,'sd_ddof':0},
             'element_counts':{e:int(np.count_nonzero(analysis.structure.elements==e)) for e in target},
             'target_counts':{e:float(np.sum(p*shell_volumes(edges))) for e,p in target.items()},
-            'levels':levels,'compare':comparisons,'generated':assessed,'chain_type_spread':chain_spread(analysis,edges,target),
+            'levels':levels,'compare':comparisons,'generated':assessed,'chain_type_spread':{'available':False,'reason':'not defined for resized layered targets'} if settings.get('resized',False) else chain_spread(analysis,edges,target),
             'suggested':suggest(levels,comparisons,floor_multiple,floor_basis,floor_statistic,model=model)}

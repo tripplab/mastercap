@@ -501,6 +501,10 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         raise MastercapError("Target model must be reference or step")
     if target_model == "step" and sulfur_residue_placement == "reference":
         raise MastercapError("Sulfur reference placement is incompatible with step targets")
+    scaling=getattr(target_definition,'geometry_scaling',None)
+    if (sulfur_residue_placement == 'reference' and scaling and
+            any(scaling.get(key,1) != 1 for key in ('curvature_factor','thickness_factor'))):
+        raise MastercapError('--sulfur-residue-placement reference requires the reference geometry; use profile placement when resizing')
     preparation_started = time.monotonic()
     if not np.isfinite(sulfur_anchor_tolerance) or sulfur_anchor_tolerance < 0:
         raise MastercapError('Sulfur anchor tolerance must be finite and nonnegative')
@@ -648,7 +652,8 @@ def search(structure, analysis, edges, profiles, center, rng, mode="independent"
         geometry = validate_geometry(candidate, center, edges, analysis.limits, margin, mode,
                                      local=local, metadata=metadata)
         measure_held = iteration == 0 or geometry['mandatory_pass'] or controller.pending is not None
-        metrics = profile_metrics(candidate, center, edges, profiles, analysis.original if target_model == "reference" else original_profiles,
+        reference = original_profiles if original_profiles is not None else (analysis.original if target_model == "reference" else None)
+        metrics = profile_metrics(candidate, center, edges, profiles, reference,
                                   metadata=metadata, held_out=held_out if measure_held else None,
                                   held_out_independent=independent if measure_held else None,
                                   partitions=partitions if refine_bin_dither > 1 else None)

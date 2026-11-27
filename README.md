@@ -1,6 +1,6 @@
 # mastercap
 
-**Current version: 0.1.16**
+**Current version: 0.1.17**
 
 Reference-driven generation of spherical geometric capsid particles in Python.
 Particles derive radial element targets and residue composition from an
@@ -8,9 +8,10 @@ Particles derive radial element targets and residue composition from an
 step-profile control wall. They are for geometry and
 visualization, not chemically valid protein design or molecular dynamics.
 
-Version 0.1.16 adds outer-radius geometry factors for both target arms and
-compact, SHA-256-checked atom-data sidecars by default. See
-[geometry factors and report files](#geometry-factors-and-report-files-v0116).
+Version 0.1.17 replaces layered thickness stretching with a wall-preserving
+core splice and uses the same absolute, bin-rounded thickness change in both
+arms. See [thickness changes](#thickness-changes-v0117). Compressed atom-data
+sidecars remain the default; see [report files](#report-files).
 Search and geometry defaults are unchanged. Version 0.1.15 added bounded pre-feasible residue recovery (on by default),
 opt-in whole-residue wall translations and undo diagnostics by residue relation.
 Wall selection remains `edge-first` and bin dithering remains 1. Reference/step
@@ -21,7 +22,7 @@ targets, mandatory geometry and calibration definitions are unchanged. Set
 for the earlier search behavior.
 
 **Status:** geometric prototype with synthetic regression tests, complete 1CWP
-benchmarks through v0.1.12 and reference-resampling calibration. v0.1.16 adds
+benchmarks through v0.1.12 and reference-resampling calibration. v0.1.17 adds
 synthetic unit coverage and runs the existing suite; no benchmarks or production
 particles are run in this revision. Full-capsid behavior awaits user validation.
 Independent experimental
@@ -1526,41 +1527,117 @@ new PDB. Existing outputs require `--overwrite`. All output content is staged;
 promotion errors trigger rollback. Individual files are atomic, but the group
 is not crash-atomic. No incomplete PDB replaces a prior successful output.
 
-## Geometry factors and report files (v0.1.16)
+## Thickness changes (v0.1.17)
 
 `generate` and `calibrate` accept `--curvature-factor F` and
-`--thickness-factor G`. Both range from 0.25 to 4; when either is supplied,
-the other defaults to 1. For each arm's own reference outer radius `R0` and
-thickness `T0`:
+`--thickness-factor G`. Each is in [0.25,4]; a missing factor becomes 1 when
+the other is supplied. Factors are exclusive with `--inner-radius` and
+`--outer-radius`. With neither factor, the target is unchanged.
+
+Both arms use the reference **step-fit thickness** to determine one absolute
+thickness change. This avoids changing the arms by different Å amounts merely
+because their reference thickness definitions differ:
 
 ```text
-outer = R0 / F
-thickness = G * T0
+w = actual reference analysis bin width (not the requested maximum)
+t_step = reference step-fit thickness (4 Å ramp unless step mode specifies another)
+Delta_requested = (G - 1) * t_step
+n = round(abs(Delta_requested) / w)          # Python round, ties to even
+Delta = sign(G - 1) * n * w
+outer = arm reference outer / F
+thickness = arm reference thickness + Delta
 inner = outer - thickness
+G_effective = 1 + Delta / t_step
 ```
 
-The outer radius is the basis because it is the indented surface in the
-mechanics model. The step arm uses its fitted half-height bounds; the layered
-arm uses the selected reference bounds (extrema or percentiles). Thus equal
-factors mean equal relative changes, rather than identical absolute radii.
-Step support still extends half the fixed ramp width past each bound.
-Factors cannot be combined with `--inner-radius` or `--outer-radius`.
-Invalid geometry fails before search: step bounds must accommodate the ramp,
-and layered geometry needs positive inner radius and at least two nominal bins
-of thickness. With neither factor, the existing radius path is unchanged.
+The step arm uses fitted half-height bounds; the layered arm uses the selected
+reference bounds (extrema or percentiles). The outer radius is the indentation
+surface in the mechanics model. The report also records mid-radius ratios for
+mid-surface analysis. Step support extends half the fixed ramp width beyond its
+bounds. Layered geometry requires positive inner radius and thickness of at
+least two nominal bins; step bounds must accommodate the ramp. A non-unit G
+that rounds to zero bins fails and gives the smallest usable factor change.
+
+### Wall-preserving core splice
+
+The v0.1.16 layered rule stretched all reference features and sparse tails.
+For 1cwp, the supplied diagnosis found counts changed by about -12%/+10.5% at
+G=0.8/1.25, against -20%/+25% in the step arm. Splicing instead gave roughly
+-18.5%/+21%. These observations motivate the change; this revision does not run
+new capsid benchmarks.
+
+The layered arm removes `n` whole reference bins when G<1 or duplicates one band
+when G>1. The wall profiles and actual bin spacing stay intact. The step arm
+lengthens/shortens its plateau by the **same Delta**. Curvature shifts the spliced
+edges to the new outer radius without stretching the features. With G=1,
+curvature-only targets retain the v0.1.16 edge/profile path exactly.
+
+The cut is derived from each reference, with no capsid-specific constants:
+
+- Score the unsmoothed total reference density after fixed **1 Å Gaussian
+  smoothing**, with reflect boundaries and volume-integral normalization.
+  Run smoothing sigma does not affect the choice.
+- Keep `--splice-wall-keep 6` Å inside each fitted half-height wall. Compare
+  windows of half-width `--splice-window 2` Å, rounded to at least one bin,
+  around the candidate band start and end.
+- The score is `sqrt(mean((x-y)^2)) / mean(concatenate(x,y))`. Choose its
+  minimum; ties within 1e-12 favor the most central band, then the lower index.
+- Refuse missing candidates, density-free windows or a minimum above
+  `--splice-max-mismatch 0.10`. Refusal details include available space or the
+  best score/candidate median. Reduce |G-1|, or raise the threshold knowingly.
+  Duplication never repeats a band beyond the available region.
+
+The splice applies to the original per-element densities. Target smoothing runs
+**after** the splice, normalized to the spliced per-element count in the new
+shell volumes. Counts therefore follow the new volume without scaling local
+bin densities before smoothing. Explicit layered radii still use the legacy
+linear map and warn when the thickness changes; use factors for the splice.
+Splice options supplied without an active layered thickness factor warn once.
 
 ```bash
-mastercap generate --input reference.pdb --output-prefix results/resized \
-  --curvature-factor 1.5 --thickness-factor 0.8 --seed 42 --allow-approximate
+# Layered: remove a core band (1cwp at 1 Å bins: 7 bins).
+mastercap generate --input ./1cwp_full.vdb.gz --output-prefix results/thinner \
+  --thickness-factor 0.8 --seed 42 --allow-approximate
+
+# Step: the same rounded change in Å, applied to the plateau.
+mastercap generate --input ./1cwp_full.vdb.gz --output-prefix results/thinner_step \
+  --step-profile --thickness-factor 0.8 --seed 42 --allow-approximate
 ```
 
-The `geometry_scaling` block records reference/generated bounds, thickness and
-mid-radius, outer- and mid-radius ratios, and the supplied factors. Configuration
-stores the resolved bounds; validation rebuilds them and checks consistency.
-Layered edges and layer features stretch with `G`; the recorded nominal layer
-width is `G * bin_width`. Search still receives the original `--bin-width`.
-Calibration resolves factors identically and records them; compatibility depends
-on matching actual target support, not on the spelling of the resize options.
+### Reading and rebuilding the geometry report
+
+`geometry_scaling` retains reference/generated inner, outer, thickness and
+mid-radius, their ratios, requested factors, and resolved configuration bounds.
+It adds `thickness_rule=shared_absolute_delta`, the step-fit basis, actual grid
+width, requested/effective Delta, signed `delta_bins`, rounding rule, effective
+G and `arm_thickness_ratio`. The arm ratio differs between arms by design.
+Layered `thickness_method` is `splice` or `shift`; explicit thickness changes
+use `stretch`. The old `layered_bin_width_angstrom` field is removed.
+
+`geometry_scaling.splice` gives the band/reference range, generated seam radius,
+window/wall/score settings, total and informational per-element mismatches,
+threshold, candidate count/median and full `[bin, score]` list, bin counts and
+expected atom counts before/after. Sulfur is sparse; its mismatch never selects
+the cut. The step arm records `paired_layered_splice` feasibility and logs when
+the partner would be refused, but does not itself refuse for that reason.
+
+Validation recomputes the splice from the reference and saved factors/options,
+checking cut, window, mode, threshold, mismatch, signed bin delta and edges.
+A v0.1.16 report without `thickness_rule` rebuilds through legacy stretching and
+warns; old particles remain supported. Atom data and all mandatory audits retain
+their existing meaning.
+
+For resized layered targets, calibration defines counting replicates using
+rounded **target** atom totals. Self/orientation/placement baselines are undefined
+and explicitly skipped; the default suggestion basis becomes counting. An
+explicit orientation basis fails with guidance to use counting. At reference
+size, the resampling levels are unchanged. Calibration records splice settings,
+method and `resized`; compatible tolerance files must match target geometry and,
+for splices, splice settings. Reference-radius sulfur placement with non-unit
+factors is refused; choose `--sulfur-residue-placement profile` when resizing.
+Explicit-radius placement keeps its existing reference-S-within-bounds guard.
+
+## Report files
 
 By default, generation publishes `PREFIX.pdb`, `PREFIX.json` and
 `PREFIX.atomdata.npz` together. `--report-atom-data` selects:
