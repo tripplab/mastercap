@@ -1,6 +1,6 @@
 # mastercap
 
-**Current version: 0.1.17**
+**Current version: 0.1.18**
 
 Reference-driven generation of spherical geometric capsid particles in Python.
 Particles derive radial element targets and residue composition from an
@@ -8,10 +8,11 @@ Particles derive radial element targets and residue composition from an
 step-profile control wall. They are for geometry and
 visualization, not chemically valid protein design or molecular dynamics.
 
-Version 0.1.17 replaces layered thickness stretching with a wall-preserving
-core splice and uses the same absolute, bin-rounded thickness change in both
-arms. See [thickness changes](#thickness-changes-v0117). Compressed atom-data
-sidecars remain the default; see [report files](#report-files).
+Version 0.1.18 uses a shared step-fit-based radial shift for curvature, keeping
+step/layered pairs together. See [curvature changes](#curvature-changes-v0118).
+Version 0.1.17 introduced the shared absolute thickness change and layered core
+splice; see [thickness changes](#thickness-changes-v0117).
+Compressed atom-data sidecars remain the default; see [report files](#report-files).
 Search and geometry defaults are unchanged. Version 0.1.15 added bounded pre-feasible residue recovery (on by default),
 opt-in whole-residue wall translations and undo diagnostics by residue relation.
 Wall selection remains `edge-first` and bin dithering remains 1. Reference/step
@@ -22,7 +23,7 @@ targets, mandatory geometry and calibration definitions are unchanged. Set
 for the earlier search behavior.
 
 **Status:** geometric prototype with synthetic regression tests, complete 1CWP
-benchmarks through v0.1.12 and reference-resampling calibration. v0.1.17 adds
+benchmarks through v0.1.12 and reference-resampling calibration. v0.1.18 adds
 synthetic unit coverage and runs the existing suite; no benchmarks or production
 particles are run in this revision. Full-capsid behavior awaits user validation.
 Independent experimental
@@ -1544,7 +1545,9 @@ t_step = reference step-fit thickness (4 Å ramp unless step mode specifies anot
 Delta_requested = (G - 1) * t_step
 n = round(abs(Delta_requested) / w)          # Python round, ties to even
 Delta = sign(G - 1) * n * w
-outer = arm reference outer / F
+R_step = reference step-fit outer
+shift = R_step / F - R_step
+outer = R_step / F for step, arm reference outer + shift for layered
 thickness = arm reference thickness + Delta
 inner = outer - thickness
 G_effective = 1 + Delta / t_step
@@ -1557,6 +1560,37 @@ mid-surface analysis. Step support extends half the fixed ramp width beyond its
 bounds. Layered geometry requires positive inner radius and thickness of at
 least two nominal bins; step bounds must accommodate the ramp. A non-unit G
 that rounds to zero bins fails and gives the smallest usable factor change.
+
+### Curvature changes (v0.1.18)
+
+Curvature now uses one radial translation for the pair:
+`shift = R_step/F - R_step`, where `R_step` is the reference step-fit outer.
+Step outer remains exactly `R_step/F`; layered outer becomes
+`analysis.outer + shift`. Thickness and the whole-bin splice are unchanged.
+Thus F is the requested curvature factor on the **step-fit** outer; the
+layered arm's own outer-radius ratio generally differs from F. Both arms retain
+their distinct reference extent and gain/lose the same radial amount.
+
+The supplied 1cwp diagnosis illustrates why per-arm division was replaced:
+
+| F (G=1) | Step atoms | Layered atoms, old rule | Layered atoms, shared shift |
+|---|---:|---:|---:|
+| 1/1.5 | 531,803 | 563,648 (+6.0%) | about 531,680 |
+| 1.5 | 82,000 | 74,051 (-9.7%) | about 82,017 |
+
+The old mean-radius gaps were about 5.5/3.5 Å; sharing the shift aligns the
+reference-derived means. These are user-supplied observations/expected checks,
+not new benchmarks from this revision. The thickness-related gap at G!=1
+remains by design. No factors, F=1, and all step-arm targets retain their
+previous numerical behavior. Invalid selected bounds still refuse; paired
+bounds are informational, so an invalid partner never rejects the selected arm.
+
+v0.1.17 layered reports with F!=1 rebuild with `per_arm_outer` and a warning.
+Step reports rebuild without a warning because their bounds/targets are
+identical. v0.1.16 stretching compatibility remains. Calibration records the
+curvature rule and checks it when F!=1; old layered tolerance files require
+recalibration. The two rule labels are equivalent for step targets, so their
+old matching calibration files remain supported.
 
 ### Wall-preserving core splice
 
@@ -1605,6 +1639,16 @@ mastercap generate --input ./1cwp_full.vdb.gz --output-prefix results/thinner_st
 ```
 
 ### Reading and rebuilding the geometry report
+
+The block adds `curvature_rule=shared_radial_shift`, `curvature_basis=step_fit_outer`,
+`r_step_outer_angstrom`, actual `radial_shift_angstrom`, and
+`arm_outer_radius_ratio` (also retained as `outer_radius_ratio`). `paired_bounds`
+contains step/layered inner and outer values, or an error for an invalid partner.
+`target_expected_atoms` and `target_mean_radius_angstrom` audit the target's
+volume-integrated density and bin-midpoint mean. The terminal labels this mean
+as mass-weighted; its specified weights are atom counts (`density * volume`).
+Those derived audit fields are informational. Validation compares the saved
+curvature rule exactly and shift/step-fit outer within 1e-9 Å.
 
 `geometry_scaling` retains reference/generated inner, outer, thickness and
 mid-radius, their ratios, requested factors, and resolved configuration bounds.
