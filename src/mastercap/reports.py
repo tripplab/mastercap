@@ -117,7 +117,7 @@ def calibration_csv(calibration):
     names=sorted(calibration['element_counts'])+['Total']
     def row(source,label,e,values):
         n=sum(calibration['element_counts'].values()) if e=='Total' else calibration['element_counts'][e]
-        if source=='counting' and calibration['settings'].get('profile_model')=='step':
+        if source=='counting' and (calibration['settings'].get('profile_model')=='step' or calibration['settings'].get('resized',False)):
             counts={name:int(round(value)) for name,value in calibration['target_counts'].items()}
             n=sum(counts.values()) if e=='Total' else counts[e]
         return {'source':source,'label':label,'element':e,'n_atoms':n,**values}

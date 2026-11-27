@@ -262,36 +262,67 @@ class Target:
     reference_on_edges: dict | None
     step: dict | None = None
     geometry_scaling: dict | None = None
+    splice: dict | None = None
+    thickness_method: str | None = None
 
 
-def resolve_geometry(analysis, *, step, edge_width, curvature_factor=None, thickness_factor=None):
-    """Scale each arm's own outer radius and thickness; no factors means no change."""
+def resolve_geometry(analysis, *, step, edge_width=4.0, curvature_factor=None, thickness_factor=None,
+                     splice_wall_keep=6.0, splice_window=2.0, splice_max_mismatch=0.10):
+    """Use one step-fit-based absolute thickness delta for both target arms."""
     if curvature_factor is None and thickness_factor is None:return None,None,None
+    from .step import fit_step, validate_bounds
+    from .splice import plan_splice
     f=1. if curvature_factor is None else float(curvature_factor)
     g=1. if thickness_factor is None else float(thickness_factor)
     if not np.isfinite([f,g]).all() or not .25 <= f <= 4 or not .25 <= g <= 4:
         raise MastercapError(f'Geometry factors f={f:g}, g={g:g} outside the supported range [0.25, 4]')
-    if step:
-        from .step import fit_step,validate_bounds
-        fitted=fit_step(np.linalg.norm(analysis.structure.xyz-analysis.center,axis=1),edge_width=edge_width)
-        a,b=fitted.inner,fitted.outer
-    else:a,b=analysis.inner,analysis.outer
-    t0=b-a;outer=b/f;thickness=g*t0;inner=outer-thickness
-    nominal=getattr(analysis,'nominal_bin_width',None)
-    nominal=float(np.mean(np.diff(analysis.edges))) if nominal is None else nominal
+    width=float(np.diff(analysis.edges)[0])
+    requested=0.0
     try:
+        fit=fit_step(np.linalg.norm(analysis.structure.xyz-analysis.center,axis=1),edge_width=edge_width)
+        t_step=fit.outer-fit.inner
+        requested=(g-1)*t_step
+        n=int(round(abs(requested)/width))
+        if g != 1 and n == 0:
+            raise MastercapError(f'rounds to zero bins; minimum usable |G - 1| is about {width/(2*t_step):.8g}')
+        signed_n=n if g > 1 else -n
+        delta=signed_n*width
+        a,b=(fit.inner,fit.outer) if step else (analysis.inner,analysis.outer)
+        t0=b-a;outer=b/f;thickness=t0+delta;inner=outer-thickness
+        nominal=getattr(analysis,'nominal_bin_width',None) or width
         if step:validate_bounds(inner,outer,edge_width)
         elif inner <= 0 or thickness < 2*nominal:
             raise MastercapError('Layered geometry needs inner > 0 and thickness >= 2 * nominal bin width')
+        plan=None;paired=None
+        if n:
+            try:
+                plan=plan_splice(analysis,fit,n,sign=1 if signed_n > 0 else -1,
+                                 wall_keep=splice_wall_keep,window=splice_window,max_mismatch=splice_max_mismatch)
+                paired={'feasible':True,'cut_bin':plan.cut_bin,'mismatch_total':plan.mismatch_total}
+            except MastercapError as exc:
+                if not step:raise
+                paired={'feasible':False,'reason':str(exc)}
+        if not step and plan is not None:
+            # Store the actual uniform-grid endpoint, avoiding accumulated roundoff.
+            inner=outer-width*(len(analysis.edges)-1+signed_n)
+        block={'basis':'outer_radius','arm':'step' if step else 'layered','curvature_factor':f,'thickness_factor':g,
+               'reference':{'inner':a,'outer':b,'thickness':t0,'mid_radius':(a+b)/2},
+               'generated':{'inner':inner,'outer':outer,'thickness':outer-inner,'mid_radius':(inner+outer)/2},
+               'outer_radius_ratio':b/outer,'mid_radius_ratio':(a+b)/(inner+outer),'thickness_ratio':(outer-inner)/t0,
+               'thickness_rule':'shared_absolute_delta','thickness_basis':'step_fit_thickness',
+               't_step_angstrom':t_step,'grid_width_angstrom':width,'delta_requested_angstrom':requested,
+               'delta_angstrom':delta,'delta_bins':signed_n,'rounding':'nearest whole reference bin',
+               'thickness_factor_requested':g,'thickness_factor_effective':1+delta/t_step,
+               'arm_thickness_ratio':(outer-inner)/t0}
+        if step:
+            block.update(step_support=[inner-edge_width/2,outer+edge_width/2],thickness_method='plateau',
+                         paired_layered_splice=paired or {'feasible':True,'cut_bin':None,'mismatch_total':None})
+        else:
+            block['thickness_method']='splice' if n else 'shift'
+            if plan is not None:block['splice']=plan.report(analysis.edges,outer=outer)
+        return inner,outer,block
     except MastercapError as exc:
-        raise MastercapError(f'Geometry factors f={f:g}, g={g:g} give invalid bounds {inner:.12g}..{outer:.12g} A: {exc}') from exc
-    block={'basis':'outer_radius','arm':'step' if step else 'layered','curvature_factor':f,'thickness_factor':g,
-           'reference':{'inner':a,'outer':b,'thickness':t0,'mid_radius':(a+b)/2},
-           'generated':{'inner':inner,'outer':outer,'thickness':thickness,'mid_radius':(inner+outer)/2},
-           'outer_radius_ratio':b/outer,'mid_radius_ratio':(a+b)/(inner+outer),'thickness_ratio':g}
-    if step:block['step_support']=[inner-edge_width/2,outer+edge_width/2]
-    else:block['layered_bin_width_angstrom']=nominal*g
-    return inner,outer,block
+        raise MastercapError(f'Geometry factors f={f:g}, G={g:g}, Delta_req={requested:.8g} A, w={width:.8g} A: {exc}') from exc
 
 
 def target_on_edges(target, new_edges):
@@ -356,11 +387,21 @@ def dither_partitions(target, k):
     return partitions
 
 
-def build_target(analysis, inner=None, outer=None, *, step=False, edge_width=4.0, bin_width=None):
+def build_target(analysis, inner=None, outer=None, *, step=False, edge_width=4.0, bin_width=None, splice=None):
     """Single target definition for fitting, generation, calibration and validation."""
+    if not step and splice is not None:
+        from .splice import apply_splice, _smooth
+        outer=analysis.outer if outer is None else outer
+        edges,original=apply_splice(analysis.edges,analysis.original,splice)
+        edges=outer-float(np.diff(analysis.edges)[0])*np.arange(len(edges)-1,-1,-1)
+        if inner is not None and not np.isclose(edges[0],inner,rtol=0,atol=1e-9):
+            raise MastercapError('Spliced inner edge differs from resolved geometry')
+        profiles={e:_smooth(p,edges,analysis.smoothing_sigma) for e,p in original.items()}
+        return Target(edges,profiles,original,splice=splice.report(analysis.edges,outer=outer),thickness_method='splice')
     if not step:
         edges, profiles = target_profiles(analysis, inner, outer)
-        return Target(edges, profiles, analysis.original)
+        stretched=abs((edges[-1]-edges[0])-(analysis.outer-analysis.inner)) > 1e-9
+        return Target(edges, profiles, analysis.original,thickness_method='stretch' if stretched else None)
     from .step import fit_step, integral, step_profiles, validate_bounds
     from .model import MASS
     radii = np.linalg.norm(analysis.structure.xyz-analysis.center, axis=1)

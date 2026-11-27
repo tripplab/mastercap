@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -15,6 +16,7 @@ from mastercap.model import Atom, Structure, MastercapError
 from mastercap.pdbio import pdb_text
 from mastercap.radial import shell_volumes
 from mastercap.step import fit_step, integral
+from mastercap.splice import SplicePlan
 
 
 def reference(width=.5):
@@ -29,13 +31,16 @@ def test_resolve_geometry_formulas_unity_and_no_factors(step):
     a=reference();width=.5
     original=fit_step(np.linalg.norm(a.structure.xyz-a.center,axis=1),edge_width=width) if step else a
     r0=original.outer;t0=original.outer-original.inner
-    inner,outer,block=resolve_geometry(a,step=step,edge_width=width,curvature_factor=1.5,thickness_factor=.8)
+    inner,outer,block=resolve_geometry(a,step=step,edge_width=width,curvature_factor=1.5,thickness_factor=.8,splice_wall_keep=.01,splice_window=.1,splice_max_mismatch=1)
     assert outer==pytest.approx(r0/1.5,abs=1e-12)
-    assert outer-inner==pytest.approx(.8*t0,abs=1e-12)
-    assert inner==pytest.approx(r0/1.5-.8*t0,abs=1e-12)
+    delta=-round(.2*(fit_step(np.linalg.norm(a.structure.xyz-a.center,axis=1),edge_width=width).thickness)/.5)*.5
+    assert outer-inner==pytest.approx(t0+delta,abs=1e-12)
+    assert inner==pytest.approx(r0/1.5-t0-delta,abs=1e-12)
     assert block['basis']=='outer_radius' and block['outer_radius_ratio']==pytest.approx(1.5)
     assert block['mid_radius_ratio']==pytest.approx((original.inner+original.outer)/(inner+outer))
-    if not step:assert block['layered_bin_width_angstrom']==pytest.approx(.5*.8)
+    if not step:
+        assert 'layered_bin_width_angstrom' not in block
+        assert block['delta_bins']==round(delta/.5)
     else:np.testing.assert_allclose(block['step_support'],[inner-width/2,outer+width/2])
     x,y,_=resolve_geometry(a,step=step,edge_width=width,curvature_factor=1.,thickness_factor=1.)
     np.testing.assert_allclose([x,y],[original.inner,original.outer],rtol=0,atol=1e-12)
@@ -50,7 +55,7 @@ def test_invalid_geometry_factors_and_resulting_bounds(step,f,g):
 
 
 def test_step_too_thin_and_layered_less_than_two_nominal_bins():
-    with pytest.raises(MastercapError,match='f=1, g=0.25.*invalid bounds'):
+    with pytest.raises(MastercapError,match='f=1, G=0.25.*Step bounds'):
         resolve_geometry(reference(),step=True,edge_width=2.,curvature_factor=1.,thickness_factor=.25)
     with pytest.raises(MastercapError,match='nominal bin width'):
         resolve_geometry(reference(.75),step=False,edge_width=0,thickness_factor=.25)
@@ -60,15 +65,16 @@ def test_target_integrated_count_scaling_for_both_arms():
     a=reference()
     for step in (False,True):
         base=build_target(a,step=step,edge_width=.5,bin_width=.5)
-        inner,outer,block=resolve_geometry(a,step=step,edge_width=.5,curvature_factor=1.5,thickness_factor=.8)
-        target=build_target(a,inner,outer,step=step,edge_width=.5,bin_width=.5)
+        inner,outer,block=resolve_geometry(a,step=step,edge_width=.5,curvature_factor=1.5,thickness_factor=.8,splice_wall_keep=.01,splice_window=.1,splice_max_mismatch=1)
+        plan=SplicePlan.from_report(block['splice'],a) if not step else None
+        target=build_target(a,inner,outer,step=step,edge_width=.5,bin_width=.5,splice=plan)
         count=float(np.sum(target.profiles['C']*shell_volumes(target.edges)))
         if step:
             fit=base.step['fit']
             expected=len(a.structure.atoms)*integral(inner,outer,.5)/integral(fit['inner'],fit['outer'],.5)
         else:
-            expected=float(np.sum(a.smoothed['C']*shell_volumes(target.edges)))
-            np.testing.assert_allclose(np.diff(target.edges),np.diff(a.edges)*.8,rtol=1e-12)
+            expected=float(np.sum(target.reference_on_edges['C']*shell_volumes(target.edges)))
+            np.testing.assert_allclose(np.diff(target.edges),.5,rtol=1e-12)
         assert count==pytest.approx(expected,rel=1e-12)
 
 
@@ -202,7 +208,10 @@ def test_sidecar_overwrite_and_input_protection(tmp_path,small_pdb,capsys):
 
 
 @pytest.mark.parametrize('step',[False,True])
-def test_resolved_config_validation_and_tampered_scaling(tmp_path,small_structure,step,capsys):
+def test_resolved_config_validation_and_tampered_scaling(tmp_path,small_structure,step,capsys,monkeypatch):
+    # This four-atom CLI fixture cannot fit a 4 A ramp. Isolate its geometry
+    # round-trip check from the separately tested reference fit.
+    if not step:monkeypatch.setattr('mastercap.step.fit_step',lambda r,**kw:fit_step(r,edge_width=0))
     small_structure.xyz[1,0]=-1.6;small_structure.xyz[2,0]=1.6
     source=tmp_path/'ref.pdb';source.write_text(pdb_text(small_structure)[0]);prefix=tmp_path/'scaled'
     flags=['--step-profile','--step-edge-width','0'] if step else []
@@ -220,7 +229,8 @@ def test_resolved_config_validation_and_tampered_scaling(tmp_path,small_structur
 
 
 @pytest.mark.parametrize('factor_flag',['--curvature-factor','--thickness-factor'])
-def test_calibration_single_factor_and_saved_settings(tmp_path,small_pdb,factor_flag):
+def test_calibration_single_factor_and_saved_settings(tmp_path,small_pdb,factor_flag,monkeypatch):
+    monkeypatch.setattr('mastercap.step.fit_step',lambda r,**kw:SimpleNamespace(inner=.1,outer=2.5,thickness=2.4))
     prefix=tmp_path/'calib'
     assert main(['calibrate','--input',str(small_pdb),'--output-prefix',str(prefix),'--bin-width','.4',
                  '--no-smoothing',factor_flag,'1','--replicates','2'])==0

@@ -11,6 +11,7 @@ import shlex
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import numpy as np
 import scipy
 
@@ -215,6 +216,12 @@ def log_acceptance(status, geometry, metrics, composition_tolerance):
     LOG.info('Acceptance status: %s; %s', status, explanations[status])
 
 
+class SpliceOptionAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        namespace.splice_options_explicit = True
+
+
 class DetailedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
     """Show concrete defaults and preserve readable examples and explanations."""
 
@@ -228,7 +235,7 @@ class DetailedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.Raw
         "pair_limit_override": "S-S=steric",
         "smoothing_sigma": "1.0 (0 with --step-profile)",
         "step_edge_width": "4.0 with --step-profile",
-        "floor_basis": "orientation (counting with --step-profile)",
+        "floor_basis": "orientation (counting for step or resized layered targets)",
         "inter_residue_scale": "1.0 with --inter-residue-limits reference",
         "curvature_factor": "1 when either geometry factor is supplied",
         "thickness_factor": "1 when either geometry factor is supplied",
@@ -402,7 +409,7 @@ Reading the calibration PNG:
   Hollow diamonds show --compare shape errors; filled triangles show --generated
   errors. Without those options the corresponding rows have no sample markers.
   The dashed line is the suggested per-element tolerance (default 2 * orientation
-  p95, or counting p95 with --step-profile); an element's triangle at or left of
+  p95, or counting p95 for step/resized layered targets); an element's triangle at or left of
   it passes that profile threshold.
   Total is diagnostic and has no tolerance. Zero errors use a labelled display
   position because log(0) is undefined. No particle is assessed unless supplied
@@ -490,15 +497,27 @@ FEM-ORIENTED DIAGNOSTICS:
 
 GEOMETRY_HELP = """
 GEOMETRY FACTORS:
-  --curvature-factor F --thickness-factor G resize either arm using its own
-  reference outer radius R0 and thickness T0: outer = R0/F, thickness = G*T0,
-  inner = outer - thickness. A missing factor is 1; supported range is [0.25, 4].
-  Step uses fitted half-height bounds; layered uses the selected reference bounds.
-  Factors are exclusive with --inner-radius and --outer-radius. Example:
-    --curvature-factor 1.5 --thickness-factor 0.8
-  Layered bins/features stretch with G; step ramp width stays fixed. The report
-  records outer- and mid-radius ratios, resolved bounds and effective layer width.
-  calibrate uses the same geometry; tolerances require matching resolved support.
+  --curvature-factor F sets outer = arm reference outer / F. Missing F or G
+  means 1; supported range is [0.25,4]. Factors are exclusive with explicit radii.
+  Both arms use Delta_req = (G-1)*reference step-fit thickness, rounded to the
+  nearest whole reference bin (Python round, ties to even). Thickness = arm
+  reference thickness + Delta; inner = outer - thickness. G_eff records the
+  rounded multiplier relative to step-fit thickness, not each arm's own thickness.
+  Step changes its plateau; layered removes/duplicates a core band, preserving
+  wall profiles and bin spacing. Core cuts use fixed 1 A scoring smoothing,
+  independent of target smoothing. No acceptable cut, zero-bin requested change
+  or invalid bounds fails with details. The step report states whether its paired
+  layered splice is feasible. Ramp width stays fixed. Explicit layered radii
+  keep legacy stretching and warn when thickness changes.
+  Splice controls: --splice-wall-keep 6 --splice-window 2 --splice-max-mismatch 0.10.
+  Raising mismatch is a scientific choice; inspect geometry_scaling.splice.
+  Layered example (1cwp at 1 A bins: removes 7 reference bins):
+    mastercap generate --input ./1cwp_full.vdb.gz --output-prefix results/thinner --thickness-factor 0.8 --allow-approximate
+  Step example (same absolute rounded Delta):
+    mastercap generate --input ./1cwp_full.vdb.gz --output-prefix results/thinner_step --step-profile --thickness-factor 0.8 --allow-approximate
+  calibrate uses the same resolver. Resized layered targets define counting
+  baselines only; self/orientation/placement are skipped. Use profile sulfur
+  placement when resizing. Old v0.1.16 reports validate using legacy stretching.
 """
 
 REPORT_HELP = """
@@ -655,7 +674,10 @@ def parser():
             command.add_argument("--outer-radius", type=finite_positive, help="Outer atom-center radius in A; with --step-profile: step half-height bound; atoms may extend --step-edge-width/2 beyond it")
         if name in ('generate','calibrate'):
             command.add_argument('--curvature-factor',type=finite_positive,default=None,help='Curvature multiplier F in [0.25,4]: arm reference outer radius / F; exclusive with explicit radii; missing factor means 1')
-            command.add_argument('--thickness-factor',type=finite_positive,default=None,help='Thickness multiplier G in [0.25,4] on the arm reference thickness; exclusive with explicit radii; missing factor means 1')
+            command.add_argument('--thickness-factor',type=finite_positive,default=None,help='Thickness multiplier G in [0.25,4]. Both arms change by the same absolute Delta = (G-1) x step-fit thickness, rounded to whole reference bins. Layered arm: wall-preserving core splice (refused without an acceptable cut). Step arm: longer/shorter plateau. Missing factor means 1; exclusive with explicit radii')
+            command.add_argument('--splice-wall-keep',type=finite_positive,default=6.0,action=SpliceOptionAction,help='Reference core exclusion distance from fitted walls in A; only layered thickness splices')
+            command.add_argument('--splice-window',type=finite_positive,default=2.0,action=SpliceOptionAction,help='Half-window in A for fixed-1-A-smoothed splice scoring; only layered thickness splices')
+            command.add_argument('--splice-max-mismatch',type=positive_fraction,default=0.10,action=SpliceOptionAction,help='Maximum relative RMS seam mismatch in (0,1]; raise knowingly; only layered thickness splices')
         if name == "generate":
             command.add_argument('--report-atom-data',choices=('sidecar','inline','omit'),default='sidecar',help='Per-atom mapping and residue transforms: compressed NPZ beside JSON (default), old inline layout, or omit with weaker signature-only validation')
             command.add_argument("--center", choices=("reference", "origin"), default="reference", help="Target center: reference coordinate mean or origin (0, 0, 0)")
@@ -763,6 +785,13 @@ def resolve_target_options(args):
                 raise MastercapError('Geometry factors are mutually exclusive with --inner-radius and --outer-radius')
             if any(value is not None and not .25 <= value <= 4 for value in factors):
                 raise MastercapError('Geometry factors outside the supported range [0.25, 4]')
+    if args.command in ('generate','calibrate'):
+        if (getattr(args,'splice_options_explicit',False) and
+                (args.step_profile or args.thickness_factor in (None,1))):
+            LOG.warning('Splice configuration has no effect without a layered thickness factor')
+        if (not args.step_profile and getattr(args,'sulfur_residue_placement','off') == 'reference'
+                and any(value not in (None,1) for value in (args.curvature_factor,args.thickness_factor))):
+            raise MastercapError('--sulfur-residue-placement reference requires the reference geometry; use profile placement when resizing')
     if args.command == 'generate':
         if args.inter_residue_limits=='off' and args.inter_residue_scale is not None:
             raise MastercapError('--inter-residue-scale requires --inter-residue-limits reference')
@@ -783,6 +812,7 @@ def resolve_target_options(args):
     args.step_edge_width = 4.0 if args.step_edge_width is None else args.step_edge_width
     args.smoothing_sigma = 0.0 if args.step_profile else (1.0 if args.smoothing_sigma is None else args.smoothing_sigma)
     if args.command == 'calibrate':
+        args.floor_basis_explicit = args.floor_basis is not None
         if args.step_profile and args.floor_basis == 'orientation':
             raise MastercapError('orientation floors are not defined for step targets; use --floor-basis counting')
         if args.floor_basis is None:
@@ -793,26 +823,50 @@ def target_settings(args, analysis, edges):
     return profile_settings(analysis, edges, args.bin_width, args.radius_method, args.radius_percentiles,
                             model='step' if args.step_profile else 'reference',
                             step_edge_width=args.step_edge_width if args.step_profile else None,
-                            curvature_factor=getattr(args,'curvature_factor',None),thickness_factor=getattr(args,'thickness_factor',None))
+                            curvature_factor=getattr(args,'curvature_factor',None),thickness_factor=getattr(args,'thickness_factor',None),
+                            splice_wall_keep=getattr(args,'splice_wall_keep',6.0),splice_window=getattr(args,'splice_window',2.0),
+                            splice_max_mismatch=getattr(args,'splice_max_mismatch',0.10))
 
 
 def configured_target(args, analysis):
     inner,outer,scaling=resolve_geometry(analysis,step=args.step_profile,edge_width=args.step_edge_width,
-        curvature_factor=getattr(args,'curvature_factor',None),thickness_factor=getattr(args,'thickness_factor',None))
+        curvature_factor=getattr(args,'curvature_factor',None),thickness_factor=getattr(args,'thickness_factor',None),
+                            splice_wall_keep=getattr(args,'splice_wall_keep',6.0),splice_window=getattr(args,'splice_window',2.0),
+                            splice_max_mismatch=getattr(args,'splice_max_mismatch',0.10))
     if scaling is not None:
         args.inner_radius,args.outer_radius=inner,outer
         args.curvature_factor=scaling['curvature_factor'];args.thickness_factor=scaling['thickness_factor']
         old,new=scaling['reference'],scaling['generated']
-        LOG.info('Geometry factors: curvature x %g (outer %.6f -> %.6f A), thickness x %g (%.6f -> %.6f A); '
+        LOG.info('Geometry factors: curvature x %g (outer %.6f -> %.6f A), requested thickness G %g (%.6f -> %.6f A); '
                  'inner %.6f A; mid-radius %.6f -> %.6f A; arm %s',
                  scaling['curvature_factor'],old['outer'],new['outer'],scaling['thickness_factor'],old['thickness'],new['thickness'],
                  new['inner'],old['mid_radius'],new['mid_radius'],scaling['arm'])
-        if not args.step_profile and scaling['thickness_factor'] != 1:
-            LOG.info('Layered target stretched by thickness factor %g: bins %g A, layer features scaled by %g',
-                     scaling['thickness_factor'],scaling['layered_bin_width_angstrom'],scaling['thickness_factor'])
+        LOG.info('Thickness: G %g requested -> Delta %+.4f A (%d bins of %.6f A), G_eff %.4f; '
+                 'arm thickness %.4f -> %.4f A (ratio %.4f)',scaling['thickness_factor_requested'],
+                 scaling['delta_angstrom'],scaling['delta_bins'],scaling['grid_width_angstrom'],
+                 scaling['thickness_factor_effective'],old['thickness'],new['thickness'],scaling['arm_thickness_ratio'])
+        paired=scaling.get('paired_layered_splice')
+        if paired and not paired['feasible']:
+            LOG.info('Paired layered splice is not feasible: %s',paired['reason'])
+    from .splice import SplicePlan
+    plan=SplicePlan.from_report(scaling['splice'],analysis) if scaling and 'splice' in scaling else None
     target = build_target(analysis, args.inner_radius, args.outer_radius, step=args.step_profile,
-                          edge_width=args.step_edge_width, bin_width=args.bin_width)
+                          edge_width=args.step_edge_width, bin_width=args.bin_width, splice=plan)
     target.geometry_scaling=scaling
+    if target.splice is not None:
+        scaling['splice']=target.splice
+        block=target.splice
+        element_text=' '.join(f"{e} {v:.3f}" if v is not None else f'{e} unavailable'
+                              for e,v in block['mismatch_by_element'].items())
+        LOG.info('Layered splice: %s bins %d..%d (reference r %.3f..%.3f A), seam at generated r %.3f A, '
+                 'mismatch total %.4f (threshold %.4f; candidates %d, median %s); %s',
+                 block['mode'],block['cut_bin'],block['cut_bin']+block['n_bins'],*block['band_reference_radii'],
+                 block['seam_generated_radius'],block['mismatch_total'],block['threshold'],block['candidates'],
+                 block['candidate_median_mismatch'],element_text)
+    if not args.step_profile and scaling is None and target.thickness_method == 'stretch':
+        LOG.warning('Explicit radii stretch the layered profile (thickness ratio %.4f); layer spacing is scaled. '
+                    'Use --thickness-factor for the wall-preserving splice.',
+                    (target.edges[-1]-target.edges[0])/(analysis.outer-analysis.inner))
     if target.step is not None:
         block = target.step
         bounds, density = block['generated_bounds'], block['density']
@@ -830,6 +884,32 @@ def configured_target(args, analysis):
     return target
 
 
+def rebuild_target(analysis, saved):
+    config=saved['configuration'];options=saved['analysis_options']
+    scaling=saved.get('geometry_scaling')
+    if scaling and scaling.get('thickness_rule') == 'shared_absolute_delta':
+        if config.get('curvature_factor') is None and config.get('thickness_factor') is None:
+            raise MastercapError('Recomputed splice differs from geometry_scaling.splice: missing saved factors')
+        args=SimpleNamespace(inner_radius=None,outer_radius=None,
+            curvature_factor=config.get('curvature_factor'),thickness_factor=config.get('thickness_factor'),
+            step_profile=options.get('step_profile',False),step_edge_width=options.get('step_edge_width',4.0),
+            bin_width=options['width'],splice_wall_keep=config.get('splice_wall_keep',6.0),
+            splice_window=config.get('splice_window',2.0),splice_max_mismatch=config.get('splice_max_mismatch',0.10))
+        try:
+            target=configured_target(args,analysis)
+        except MastercapError as exc:
+            raise MastercapError(f'Recomputed splice differs from geometry_scaling.splice: {exc}') from exc
+        if not np.allclose([args.inner_radius,args.outer_radius],
+                           [config['inner_radius'],config['outer_radius']],rtol=0,atol=1e-9):
+            raise MastercapError('Recomputed splice differs from geometry_scaling.splice: configuration bounds')
+        return target
+    if scaling and not options.get('step_profile',False):
+        LOG.warning('Legacy v0.1.16 report: layered thickness was stretched, not spliced')
+    return build_target(analysis,config['inner_radius'],config['outer_radius'],
+                        step=options.get('step_profile',False),edge_width=options.get('step_edge_width',4.0),
+                        bin_width=options['width'])
+
+
 def verify_geometry_scaling(target,saved):
     if not saved.get('geometry_scaling'):return
     try:
@@ -839,6 +919,23 @@ def verify_geometry_scaling(target,saved):
             raise ValueError('resolved bounds')
     except (KeyError,ValueError,TypeError) as exc:
         raise MastercapError(f'Recomputed geometry differs from geometry_scaling.generated: {exc}') from exc
+    previous=saved['geometry_scaling']
+    if previous.get('thickness_rule') == 'shared_absolute_delta':
+        current=target.geometry_scaling or {}
+        def differ(key):
+            raise MastercapError(f'Recomputed splice differs from geometry_scaling.splice: {key}')
+        if current.get('delta_bins') != previous.get('delta_bins'):differ('delta_bins')
+        old,new=previous.get('splice'),current.get('splice')
+        if (old is None) != (new is None):differ('presence')
+        if old is not None:
+            for key in ('mode','cut_bin','n_bins','window_bins','threshold'):
+                if new.get(key) != old.get(key):differ(key)
+            try:
+                if not np.isclose(new['mismatch_total'],old['mismatch_total'],rtol=0,atol=1e-12):differ('mismatch_total')
+            except (KeyError,TypeError,ValueError):differ('mismatch_total')
+        recorded_edges=saved.get('target',{}).get('edges')
+        if recorded_edges is not None:
+            if np.shape(recorded_edges) != target.edges.shape or not np.allclose(recorded_edges,target.edges,rtol=0,atol=1e-9):differ('edges')
 
 
 def verify_saved_step(target, saved):
@@ -955,6 +1052,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                                    "manual_tolerances" if args.profile_tolerance is not None or args.composition_tolerance is not None else "not_supplied"), "pdb_convention": "TER segments; serials and chains may repeat"})
     if target.step is not None:
         report["target"]["step"] = target.step
+    if target.thickness_method is not None:report['target']['thickness_method']=target.thickness_method
     if target.geometry_scaling is not None:report['geometry_scaling']=target.geometry_scaling
     LOG.info("Selected reference: %d atoms; target radii %.3f..%.3f A; seed %d", len(analysis.structure.atoms), edges[0], edges[-1], args.seed)
     export_started = None
@@ -1179,9 +1277,7 @@ def validate_command(args, source, started, names):
     particle = read_pdb(args.pdb, generated=True)
     config = saved["configuration"].copy()
     try:
-        target = build_target(analysis, config["inner_radius"], config["outer_radius"],
-                              step=options.get('step_profile', False), edge_width=options.get('step_edge_width', 4.0),
-                              bin_width=options['width'])
+        target = rebuild_target(analysis,saved)
     except MastercapError as exc:
         if options.get('step_profile') or saved.get('target', {}).get('step'):
             raise MastercapError(f'Recomputed step target differs from the generation report: {exc}') from exc
@@ -1232,6 +1328,7 @@ def validate_command(args, source, started, names):
                             'profiles': {e:p.tolist() for e,p in profiles.items()}, 'step': target.step}
     report["inter_residue_limits"]=inter_report
     report['atom_data']=atom_data.source
+    if target.thickness_method is not None:report.setdefault('target',{})['thickness_method']=target.thickness_method
     if saved.get('geometry_scaling'):report['geometry_scaling']=saved['geometry_scaling']
     add_diagnostics(report, particle, analysis, center, target, args.mesh_element_sizes, transforms)
     files = {names["json"]: encode_json(report)}
@@ -1297,11 +1394,16 @@ def run(args):
         target = configured_target(args, analysis)
         edges, profiles = target.edges, target.profiles
         settings = target_settings(args, analysis, edges)
+        if settings['resized'] and not args.step_profile:
+            if args.floor_basis_explicit and args.floor_basis != 'counting':
+                raise MastercapError('orientation floors are not defined for resized layered targets; use --floor-basis counting')
+            args.floor_basis='counting'
+            LOG.info('Resized layered calibration: self/orientation/placement skipped; only counting sets tolerances')
         if target.step is not None:
             LOG.info('Step calibration: reference vs step is model mismatch, not a floor; '
                      'orientation/placement skipped; only counting sets tolerances')
         def level_progress(name,stats):
-            LOG.info('Calibration %s: %s','reference vs step' if name=='self' and args.step_profile else name,', '.join(f"{e}={value['mean']:.6g}" for e,value in stats.items()))
+            LOG.info('Calibration %s: %s','reference vs step' if name=='self' and args.step_profile else name,stats['skipped'] if 'skipped' in stats else ', '.join(f"{e}={value['mean']:.6g}" for e,value in stats.items()))
         calibration=calibrate(analysis,edges,profiles,settings,args.replicates,args.seed,args.compare,args.generated,
                               args.floor_multiple,args.floor_basis,args.floor_statistic,level_progress)
         calibration['suggested']['tolerances_from_line']=f'--tolerances-from {shlex.quote(str(names["json"]))}'
@@ -1316,6 +1418,7 @@ def run(args):
         report=base_report(args,started)
         report.update(status='calibration_complete',calibration=calibration,warnings=analysis.warnings,acquisition=acquisition)
         if target.geometry_scaling is not None:report['geometry_scaling']=target.geometry_scaling
+        if target.thickness_method is not None:report.setdefault('target',{})['thickness_method']=target.thickness_method
         if target.step is not None:report['target']={'step':target.step, 'edges':edges.tolist(), 'profiles':{e:p.tolist() for e,p in profiles.items()}}
         files={names['json']:encode_json(report)}
         if args.csv:files[names['csv']]=calibration_csv(calibration)

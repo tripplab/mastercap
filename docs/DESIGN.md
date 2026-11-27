@@ -9,6 +9,7 @@ thresholds remain provisional until calibrated on expanded CCMV 1CWP.
 | `pdbio.py` | PDB/gzip/models, filtering, VIPERdb cache, TER writer. |
 | `analysis.py` | Center, bounds, profiles, smoothing, pair statistics and shared target dispatcher. |
 | `radial.py` | Array-only shell volumes and radial bin convention. |
+| `splice.py` | Reference-only core cut scoring, whole-bin splice plans and audit records. |
 | `step.py` | Analytic ramp integrals and moment-matched homogeneous targets. |
 | `calibration.py` | Profile baselines, settings compatibility and tolerance suggestions. |
 | `diagnostics.py` | Mesh-scale contacts, nonbonded reference neighbors, walls, layering and drift. |
@@ -633,27 +634,66 @@ wall, anchor, streak/cap/RNG, multi-element inventory, mixed rigid acceptance,
 rounding and diagnostic fixtures, plus a tiny CLI generation test. No benchmark
 or production particles are executed in this revision.
 
-## Geometry factors and compact reports (v0.1.16)
+## Shared thickness changes and splicing (v0.1.17)
 
-`resolve_geometry` returns `(None, None, None)` without factors, preserving the
-existing target path and random draws. Otherwise missing factors become one;
-finite F/G in [0.25, 4] are required and explicit radii are exclusive. The arm's
-own reference geometry supplies R0/T0: fitted half-height step bounds, or
-selected analysis bounds for layered targets. Resolve outer=R0/F,
-thickness=G*T0 and inner=outer-thickness. Step `validate_bounds` enforces fixed
-ramp support; layered inner must be positive and thickness at least twice the
-nominal analysis bin width. Errors identify factors and resulting bounds.
+`resolve_geometry` returns `(None,None,None)` without factors. Otherwise finite
+F/G in [0.25,4] are required and explicit radii are exclusive. Fit reference
+radii with the step ramp width (default 4 Å, including the layered arm), and
+set requested Delta=(G-1)*t_step. Using the actual uniform analysis edge width
+w, n=round(abs(Delta)/w) (Python ties-to-even), signed Delta=sign(G-1)*n*w.
+Both arms use thickness=T_arm+Delta, outer=R_arm/F, inner=outer-thickness.
+Step R/T are half-height fit bounds; layered R/T are selected analysis bounds.
+Non-unit G rounded to zero refuses with the minimum usable |G-1|. Bound checks
+retain fixed-ramp validation and positive layered inner/minimum two nominal bins.
+No factors retain the exact target; curvature alone retains the v0.1.16 shift.
 
-The outer surface is the indentation basis. `geometry_scaling` also records
-reference/generated mid-radius and their ratio for mid-surface mechanics,
-outer-radius ratio, thickness ratio, and step support or nominal layered width
-G*bin_width. Layered profiles retain linear edge stretching, scaling layer
-features with thickness; the bin width passed to search is unchanged. Resolved
-bounds and factors enter configuration; validation rebuilds the target from
-those bounds and checks generated geometry to absolute 1e-9 A. Calibration
-uses the same resolver and records factors, but settings compatibility continues
-to compare target support rather than factor metadata. No target/profile/search
-definition changes in the absence of the new options.
+`splice.py` has no CLI dependencies. The frozen SplicePlan records the cut and
+all scores. Total and per-element scoring profiles use original densities,
+Gaussian sigma=1 Å, reflect mode and volume-integral normalization; target run
+sigma never selects the cut. Bin lo starts at the first lower edge >= fitted
+inner+wall_keep; hi is exclusive after the last upper edge <= fitted
+outer-wall_keep. K=max(1,round(window/w)). Candidates satisfy lo+K<=i and
+i+n+K<=hi. Score RMS difference between S[i-K:i+K] and S[i+n-K:i+n+K], divided
+by their combined mean. Choose lowest score, with 1e-12 ties resolved by band
+center closest to (lo+hi)/2 then lower i. No candidates, empty density windows
+or minimum score above threshold refuse. Defaults are 6 Å wall keep, 2 Å window
+and 0.10 relative mismatch; only these options affect user selection. Sparse
+per-element undefined scores are null, never selection criteria. Empty
+alternative windows have null candidate scores so reports remain finite JSON.
+
+Remove original[i:i+n] or insert its copy immediately after original[i:i+n].
+New edges are outer_new-w*arange(Nnew,-1,-1), preserving whole-bin wall shapes
+and recording the actual inner endpoint. Densities are unchanged before run
+smoothing. Filter the spliced originals and normalize each to its new-shell
+volume integral. Target.reference_on_edges is the spliced original. Curvature
+and splice compose through edge translation. Explicit radii keep target_profiles
+linear stretching and record/warn thickness_method=stretch. Step targets only
+change their plateau, but include advisory paired_layered_splice feasibility.
+
+geometry_scaling records shared_absolute_delta, step-fit basis, w, requested
+Delta, signed bins/Delta, requested/effective G, arm ratio, reference/generated
+bounds and mid-radius ratios. The outer surface remains the indentation basis.
+No layered_bin_width_angstrom is recorded. The splice report includes candidate
+scores, reference band and permitted radii, generated seam convention/radius,
+per-element mismatch, expected reference/generated counts, and all selection
+settings. build_target accepts a plan; freshly resolved reports can reconstruct
+that plan without rescoring. Validate independently reruns resolution from saved
+factors/options, comparing discrete cut fields/threshold exactly, mismatch to
+absolute 1e-12 and edges/bounds to 1e-9. Reports without thickness_rule retain
+legacy v0.1.16 linear mapping, with a warning.
+
+Search metrics prefer the supplied target originals for both arms; analysis
+arrays remain appropriate only for reference diagnostics and element keys.
+Calibration settings record resized and splice controls. Resized layered
+counting uses rounded target integrals; self/orientation/placement are skipped
+because reference coordinates do not live on the resized support. Their
+multiples/gap closure are unavailable. CLI defaults to counting for these
+suggestions and refuses explicit orientation. Reference-size calibration stays
+unchanged. Reference sulfur placement with non-unit factors fails early and
+in search; explicit radii retain their old reference-radius bounds check.
+No benchmarks or production runs are part of this revision.
+
+## Compact reports (introduced in v0.1.16)
 
 `store_atom_data` defaults to `sidecar`, stripping atom_mapping,
 residue_transforms and search.initial_transforms from JSON after building
