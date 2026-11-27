@@ -497,8 +497,12 @@ FEM-ORIENTED DIAGNOSTICS:
 
 GEOMETRY_HELP = """
 GEOMETRY FACTORS:
-  --curvature-factor F sets outer = arm reference outer / F. Missing F or G
-  means 1; supported range is [0.25,4]. Factors are exclusive with explicit radii.
+  --curvature-factor F translates both arms by s = R/F - R, where R is the
+  reference step-fit outer radius. Step outer becomes R/F; layered outer is
+  its reference outer + s. Missing F or G means 1; range is [0.25,4].
+  Factors are exclusive with explicit radii. Layered and step targets at the
+  same F and G share the same radial shift and thickness change;
+  geometry_scaling.paired_bounds lists both (or an invalid partner's error).
   Both arms use Delta_req = (G-1)*reference step-fit thickness, rounded to the
   nearest whole reference bin (Python round, ties to even). Thickness = arm
   reference thickness + Delta; inner = outer - thickness. G_eff records the
@@ -673,7 +677,7 @@ def parser():
             command.add_argument("--inner-radius", type=finite_nonnegative, help="Inner atom-center radius in A; with --step-profile: step half-height bound; atoms may extend --step-edge-width/2 beyond it")
             command.add_argument("--outer-radius", type=finite_positive, help="Outer atom-center radius in A; with --step-profile: step half-height bound; atoms may extend --step-edge-width/2 beyond it")
         if name in ('generate','calibrate'):
-            command.add_argument('--curvature-factor',type=finite_positive,default=None,help='Curvature multiplier F in [0.25,4]: arm reference outer radius / F; exclusive with explicit radii; missing factor means 1')
+            command.add_argument('--curvature-factor',type=finite_positive,default=None,help='Curvature multiplier F in [0.25,4]. Both arms translate by the same radial shift s = R/F - R, where R is the reference step-fit outer radius; step outer becomes R/F. Exclusive with explicit radii; missing factor means 1')
             command.add_argument('--thickness-factor',type=finite_positive,default=None,help='Thickness multiplier G in [0.25,4]. Both arms change by the same absolute Delta = (G-1) x step-fit thickness, rounded to whole reference bins. Layered arm: wall-preserving core splice (refused without an acceptable cut). Step arm: longer/shorter plateau. Missing factor means 1; exclusive with explicit radii')
             command.add_argument('--splice-wall-keep',type=finite_positive,default=6.0,action=SpliceOptionAction,help='Reference core exclusion distance from fitted walls in A; only layered thickness splices')
             command.add_argument('--splice-window',type=finite_positive,default=2.0,action=SpliceOptionAction,help='Half-window in A for fixed-1-A-smoothed splice scoring; only layered thickness splices')
@@ -825,21 +829,26 @@ def target_settings(args, analysis, edges):
                             step_edge_width=args.step_edge_width if args.step_profile else None,
                             curvature_factor=getattr(args,'curvature_factor',None),thickness_factor=getattr(args,'thickness_factor',None),
                             splice_wall_keep=getattr(args,'splice_wall_keep',6.0),splice_window=getattr(args,'splice_window',2.0),
-                            splice_max_mismatch=getattr(args,'splice_max_mismatch',0.10))
+                            splice_max_mismatch=getattr(args,'splice_max_mismatch',0.10),
+                            curvature_rule=getattr(args,'curvature_rule','shared_radial_shift'))
 
 
 def configured_target(args, analysis):
     inner,outer,scaling=resolve_geometry(analysis,step=args.step_profile,edge_width=args.step_edge_width,
         curvature_factor=getattr(args,'curvature_factor',None),thickness_factor=getattr(args,'thickness_factor',None),
                             splice_wall_keep=getattr(args,'splice_wall_keep',6.0),splice_window=getattr(args,'splice_window',2.0),
-                            splice_max_mismatch=getattr(args,'splice_max_mismatch',0.10))
+                            splice_max_mismatch=getattr(args,'splice_max_mismatch',0.10),
+                            curvature_rule=getattr(args,'curvature_rule','shared_radial_shift'))
     if scaling is not None:
         args.inner_radius,args.outer_radius=inner,outer
         args.curvature_factor=scaling['curvature_factor'];args.thickness_factor=scaling['thickness_factor']
         old,new=scaling['reference'],scaling['generated']
-        LOG.info('Geometry factors: curvature x %g (outer %.6f -> %.6f A), requested thickness G %g (%.6f -> %.6f A); '
+        LOG.info('Geometry factors: curvature F %g on step-fit outer %.6f A -> shift %+.6f A (%s); '
+                 'arm outer %.6f -> %.6f A (ratio %.6f); requested thickness G %g (%.6f -> %.6f A); '
                  'inner %.6f A; mid-radius %.6f -> %.6f A; arm %s',
-                 scaling['curvature_factor'],old['outer'],new['outer'],scaling['thickness_factor'],old['thickness'],new['thickness'],
+                 scaling['curvature_factor'],scaling['r_step_outer_angstrom'],scaling['radial_shift_angstrom'],
+                 scaling['curvature_rule'],old['outer'],new['outer'],scaling['arm_outer_radius_ratio'],
+                 scaling['thickness_factor'],old['thickness'],new['thickness'],
                  new['inner'],old['mid_radius'],new['mid_radius'],scaling['arm'])
         LOG.info('Thickness: G %g requested -> Delta %+.4f A (%d bins of %.6f A), G_eff %.4f; '
                  'arm thickness %.4f -> %.4f A (ratio %.4f)',scaling['thickness_factor_requested'],
@@ -853,6 +862,14 @@ def configured_target(args, analysis):
     target = build_target(analysis, args.inner_radius, args.outer_radius, step=args.step_profile,
                           edge_width=args.step_edge_width, bin_width=args.bin_width, splice=plan)
     target.geometry_scaling=scaling
+    if scaling is not None:
+        from .radial import shell_volumes
+        volume=shell_volumes(target.edges)
+        counts=sum(target.profiles.values())*volume
+        scaling['target_expected_atoms']=float(np.sum(counts))
+        scaling['target_mean_radius_angstrom']=float(np.sum((target.edges[:-1]+target.edges[1:])/2*counts)/np.sum(counts))
+        LOG.info('Target audit: expected atoms %.0f, mass-weighted mean radius %.4f A',
+                 scaling['target_expected_atoms'],scaling['target_mean_radius_angstrom'])
     if target.splice is not None:
         scaling['splice']=target.splice
         block=target.splice
@@ -890,7 +907,11 @@ def rebuild_target(analysis, saved):
     if scaling and scaling.get('thickness_rule') == 'shared_absolute_delta':
         if config.get('curvature_factor') is None and config.get('thickness_factor') is None:
             raise MastercapError('Recomputed splice differs from geometry_scaling.splice: missing saved factors')
-        args=SimpleNamespace(inner_radius=None,outer_radius=None,
+        curvature_rule=scaling.get('curvature_rule','per_arm_outer')
+        if ('curvature_rule' not in scaling and not options.get('step_profile',False)
+                and config.get('curvature_factor') not in (None,1)):
+            LOG.warning('Legacy v0.1.17 report: layered curvature used the per-arm outer radius, not the shared radial shift')
+        args=SimpleNamespace(inner_radius=None,outer_radius=None,curvature_rule=curvature_rule,
             curvature_factor=config.get('curvature_factor'),thickness_factor=config.get('thickness_factor'),
             step_profile=options.get('step_profile',False),step_edge_width=options.get('step_edge_width',4.0),
             bin_width=options['width'],splice_wall_keep=config.get('splice_wall_keep',6.0),
@@ -920,6 +941,14 @@ def verify_geometry_scaling(target,saved):
     except (KeyError,ValueError,TypeError) as exc:
         raise MastercapError(f'Recomputed geometry differs from geometry_scaling.generated: {exc}') from exc
     previous=saved['geometry_scaling']
+    if 'curvature_rule' in previous:
+        current=target.geometry_scaling or {}
+        for key in ('curvature_rule','radial_shift_angstrom','r_step_outer_angstrom'):
+            try:
+                same=(current[key]==previous[key] if key=='curvature_rule' else
+                      np.isclose(current[key],previous[key],rtol=0,atol=1e-9))
+            except (KeyError,TypeError,ValueError):same=False
+            if not same:raise MastercapError(f'Recomputed geometry differs from geometry_scaling: {key}')
     if previous.get('thickness_rule') == 'shared_absolute_delta':
         current=target.geometry_scaling or {}
         def differ(key):

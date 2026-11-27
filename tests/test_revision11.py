@@ -31,7 +31,7 @@ def test_resolve_geometry_formulas_unity_and_no_factors(step):
     a=reference();width=.5
     original=fit_step(np.linalg.norm(a.structure.xyz-a.center,axis=1),edge_width=width) if step else a
     r0=original.outer;t0=original.outer-original.inner
-    inner,outer,block=resolve_geometry(a,step=step,edge_width=width,curvature_factor=1.5,thickness_factor=.8,splice_wall_keep=.01,splice_window=.1,splice_max_mismatch=1)
+    inner,outer,block=resolve_geometry(a,step=step,edge_width=width,curvature_factor=1.5,thickness_factor=.8,splice_wall_keep=.01,splice_window=.1,splice_max_mismatch=1,curvature_rule='per_arm_outer')
     assert outer==pytest.approx(r0/1.5,abs=1e-12)
     delta=-round(.2*(fit_step(np.linalg.norm(a.structure.xyz-a.center,axis=1),edge_width=width).thickness)/.5)*.5
     assert outer-inner==pytest.approx(t0+delta,abs=1e-12)

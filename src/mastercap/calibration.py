@@ -94,14 +94,14 @@ def resampling_levels(analysis,edges,target,replicates=50,seed=42,progress=None,
 
 
 def profile_settings(analysis,edges,bin_width,radius_method='extrema',percentiles=(.5,99.5), *, model='reference', step_edge_width=None,
-                     curvature_factor=None,thickness_factor=None,splice_wall_keep=6.0,splice_window=2.0,splice_max_mismatch=0.10):
+                     curvature_factor=None,thickness_factor=None,splice_wall_keep=6.0,splice_window=2.0,splice_max_mismatch=0.10,curvature_rule='shared_radial_shift'):
     return {'reference_hash':analysis.structure.provenance['sha256'],
             'reference_filename':Path(analysis.structure.provenance['path']).name,
             'model':analysis.structure.provenance['model'],'bin_width':float(bin_width),
             'smoothing_sigma':analysis.smoothing_sigma,'inner_radius':float(edges[0]),'outer_radius':float(edges[-1]),
             'edges_count':len(edges),'radius_method':radius_method,'radius_percentiles':list(percentiles),
             'profile_model':model,'step_edge_width':step_edge_width if model=='step' else None,
-            'curvature_factor':curvature_factor,'thickness_factor':thickness_factor,
+            'curvature_factor':curvature_factor,'thickness_factor':thickness_factor,'curvature_rule':curvature_rule,
             'splice_wall_keep':splice_wall_keep,'splice_window':splice_window,'splice_max_mismatch':splice_max_mismatch,
             'resized':bool(model=='reference' and not np.allclose([edges[0],edges[-1]],[analysis.inner,analysis.outer],rtol=0,atol=1e-9)),
             'thickness_method':('splice' if thickness_factor not in (None,1) else
@@ -117,6 +117,15 @@ def check_settings(saved,current):
         labels.update(splice_wall_keep='splice wall keep',splice_window='splice window',splice_max_mismatch='splice max mismatch',thickness_method='thickness method')
     saved={'profile_model':'reference','step_edge_width':None,**saved}
     current={'profile_model':'reference','step_edge_width':None,**current}
+    has_curvature=any(item.get('curvature_factor') not in (None,1) for item in (saved,current))
+    for item in (saved,current):
+        item.setdefault('curvature_rule','per_arm_outer' if item.get('curvature_factor') not in (None,1) else 'shared_radial_shift')
+    if has_curvature:
+        labels['curvature_rule']='curvature rule'
+        if saved['profile_model']==current['profile_model']=='step':
+            for item in (saved,current):
+                if item['curvature_rule'] in ('per_arm_outer','shared_radial_shift'):
+                    item['curvature_rule']='shared_radial_shift'
     differences=[]
     for key,label in labels.items():
         if key not in saved:
@@ -139,6 +148,8 @@ def settings_from_generation(saved):
             'profile_model':'step' if options.get('step_profile',False) else 'reference',
             'step_edge_width':options.get('step_edge_width',4.0) if options.get('step_profile',False) else None,
             'curvature_factor':config.get('curvature_factor'),'thickness_factor':config.get('thickness_factor'),
+            'curvature_rule':saved.get('geometry_scaling',{}).get('curvature_rule',
+                'per_arm_outer' if config.get('curvature_factor') not in (None,1) else 'shared_radial_shift'),
             'splice_wall_keep':config.get('splice_wall_keep',6.0),'splice_window':config.get('splice_window',2.0),
             'splice_max_mismatch':config.get('splice_max_mismatch',0.10),
             'resized':bool(not options.get('step_profile',False) and not np.allclose([saved['target']['edges'][0],saved['target']['edges'][-1]],[analysis.get('inner_radius',saved['target']['edges'][0]),analysis.get('outer_radius',saved['target']['edges'][-1])],rtol=0,atol=1e-9)),

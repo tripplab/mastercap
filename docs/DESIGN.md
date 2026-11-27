@@ -634,14 +634,16 @@ wall, anchor, streak/cap/RNG, multi-element inventory, mixed rigid acceptance,
 rounding and diagnostic fixtures, plus a tiny CLI generation test. No benchmark
 or production particles are executed in this revision.
 
-## Shared thickness changes and splicing (v0.1.17)
+## Shared geometry changes (v0.1.17-v0.1.18)
 
 `resolve_geometry` returns `(None,None,None)` without factors. Otherwise finite
 F/G in [0.25,4] are required and explicit radii are exclusive. Fit reference
 radii with the step ramp width (default 4 Å, including the layered arm), and
 set requested Delta=(G-1)*t_step. Using the actual uniform analysis edge width
 w, n=round(abs(Delta)/w) (Python ties-to-even), signed Delta=sign(G-1)*n*w.
-Both arms use thickness=T_arm+Delta, outer=R_arm/F, inner=outer-thickness.
+Both arms use thickness=T_arm+Delta, shift=R_step/F-R_step and
+inner=outer-thickness. Step outer is computed directly as R_step/F for
+bit-identical v0.1.17 arithmetic; layered outer is analysis.outer+shift.
 Step R/T are half-height fit bounds; layered R/T are selected analysis bounds.
 Non-unit G rounded to zero refuses with the minimum usable |G-1|. Bound checks
 retain fixed-ramp validation and positive layered inner/minimum two nominal bins.
@@ -692,6 +694,38 @@ suggestions and refuses explicit orientation. Reference-size calibration stays
 unchanged. Reference sulfur placement with non-unit factors fails early and
 in search; explicit radii retain their old reference-radius bounds check.
 No benchmarks or production runs are part of this revision.
+
+### Curvature rules and pairing audits (v0.1.18)
+
+resolve_geometry accepts internal curvature_rule shared_radial_shift (default)
+or per_arm_outer (v0.1.16-v0.1.17); other values fail even without factors.
+The legacy rule retains outer=R_arm/F. Requested curvature_factor is measured
+on step-fit outer; effective arm_outer_radius_ratio and retained
+outer_radius_ratio both mean reference arm outer / generated arm outer.
+curvature_basis is step_fit_outer or legacy arm_outer; radial_shift_angstrom
+records the actual translation and r_step_outer_angstrom its reference basis.
+
+Compute both arms' bounds in the same call, applying their existing validity
+checks. The selected arm must be valid; invalid partner bounds yield an error
+entry in paired_bounds and never reject the selected arm. Layered failures
+include the shift, R_step and analysis.outer. Splice selection still works in
+reference bins and anchors edges at the generated outer. Factorless/F=1 paths
+retain their target arrays; step bounds/targets are bit-identical for all factors.
+
+After building the target, configured_target sums density*shell-volume for
+expected atoms and computes its count-weighted bin-midpoint mean radius (the
+specified terminal 'mass-weighted' audit). These and paired_bounds are derived
+information, not validation constraints. Saved curvature_rule compares exactly;
+saved shift and step-fit outer compare to absolute 1e-9 Å. New reports pass the
+saved rule to the resolver. Reports with thickness_rule but no curvature_rule
+use per_arm_outer, warning once for layered F!=1; step reports need no warning.
+The older v0.1.16 path remains unchanged.
+
+Calibration stores curvature_rule, infers legacy per_arm_outer for old non-unit
+F files, and checks rule compatibility only when either F is non-unit. Both
+known labels are equivalent for profile_model=step. Layered non-unit legacy
+calibration fails with a readable curvature-rule difference (and usually changed
+bounds). This revision has synthetic unit tests only, no production/benchmarks.
 
 ## Compact reports (introduced in v0.1.16)
 

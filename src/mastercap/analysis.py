@@ -267,8 +267,11 @@ class Target:
 
 
 def resolve_geometry(analysis, *, step, edge_width=4.0, curvature_factor=None, thickness_factor=None,
-                     splice_wall_keep=6.0, splice_window=2.0, splice_max_mismatch=0.10):
+                     splice_wall_keep=6.0, splice_window=2.0, splice_max_mismatch=0.10,
+                     curvature_rule='shared_radial_shift'):
     """Use one step-fit-based absolute thickness delta for both target arms."""
+    if curvature_rule not in ('shared_radial_shift', 'per_arm_outer'):
+        raise MastercapError(f'Invalid curvature_rule: {curvature_rule}')
     if curvature_factor is None and thickness_factor is None:return None,None,None
     from .step import fit_step, validate_bounds
     from .splice import plan_splice
@@ -287,12 +290,30 @@ def resolve_geometry(analysis, *, step, edge_width=4.0, curvature_factor=None, t
             raise MastercapError(f'rounds to zero bins; minimum usable |G - 1| is about {width/(2*t_step):.8g}')
         signed_n=n if g > 1 else -n
         delta=signed_n*width
-        a,b=(fit.inner,fit.outer) if step else (analysis.inner,analysis.outer)
-        t0=b-a;outer=b/f;thickness=t0+delta;inner=outer-thickness
+        r_step=fit.outer
+        shift=r_step/f-r_step
         nominal=getattr(analysis,'nominal_bin_width',None) or width
-        if step:validate_bounds(inner,outer,edge_width)
-        elif inner <= 0 or thickness < 2*nominal:
-            raise MastercapError('Layered geometry needs inner > 0 and thickness >= 2 * nominal bin width')
+        def bounds_for(is_step):
+            lower,upper=(fit.inner,fit.outer) if is_step else (analysis.inner,analysis.outer)
+            # Keep the step arithmetic exactly as in v0.1.17, avoiding cancellation.
+            out=upper/f if is_step or curvature_rule == 'per_arm_outer' else upper+shift
+            thickness=(upper-lower)+delta
+            inner=out-thickness
+            if is_step:validate_bounds(inner,out,edge_width)
+            elif inner <= 0 or thickness < 2*nominal:
+                raise MastercapError('Layered geometry needs inner > 0 and thickness >= 2 * nominal bin width; '
+                                     f'shift={out-upper:.8g} A, R_step={r_step:.8g} A, analysis.outer={analysis.outer:.8g} A')
+            if not is_step and n:
+                inner=out-width*(len(analysis.edges)-1+signed_n)
+            return {'inner':inner,'outer':out}
+        selected=bounds_for(step)
+        paired_bounds={('step' if step else 'layered'):selected.copy()}
+        try:
+            paired_bounds['layered' if step else 'step']=bounds_for(not step)
+        except MastercapError as exc:
+            paired_bounds['layered' if step else 'step']={'error':str(exc)}
+        a,b=(fit.inner,fit.outer) if step else (analysis.inner,analysis.outer)
+        t0=b-a;inner,outer=selected['inner'],selected['outer']
         plan=None;paired=None
         if n:
             try:
@@ -302,13 +323,13 @@ def resolve_geometry(analysis, *, step, edge_width=4.0, curvature_factor=None, t
             except MastercapError as exc:
                 if not step:raise
                 paired={'feasible':False,'reason':str(exc)}
-        if not step and plan is not None:
-            # Store the actual uniform-grid endpoint, avoiding accumulated roundoff.
-            inner=outer-width*(len(analysis.edges)-1+signed_n)
         block={'basis':'outer_radius','arm':'step' if step else 'layered','curvature_factor':f,'thickness_factor':g,
                'reference':{'inner':a,'outer':b,'thickness':t0,'mid_radius':(a+b)/2},
                'generated':{'inner':inner,'outer':outer,'thickness':outer-inner,'mid_radius':(inner+outer)/2},
                'outer_radius_ratio':b/outer,'mid_radius_ratio':(a+b)/(inner+outer),'thickness_ratio':(outer-inner)/t0,
+               'curvature_rule':curvature_rule,'curvature_basis':'step_fit_outer' if curvature_rule == 'shared_radial_shift' else 'arm_outer',
+               'r_step_outer_angstrom':r_step,'radial_shift_angstrom':outer-b,
+               'arm_outer_radius_ratio':b/outer,'paired_bounds':paired_bounds,
                'thickness_rule':'shared_absolute_delta','thickness_basis':'step_fit_thickness',
                't_step_angstrom':t_step,'grid_width_angstrom':width,'delta_requested_angstrom':requested,
                'delta_angstrom':delta,'delta_bins':signed_n,'rounding':'nearest whole reference bin',

@@ -160,7 +160,7 @@ def test_curvature_and_thickness_compose_without_stretch(synthetic):
     a,_=synthetic
     plain,_=scaled(a,.8);curved,_=scaled(a,.8,1.5)
     for e in a.original:np.testing.assert_array_equal(plain.profiles[e],curved.profiles[e])
-    np.testing.assert_allclose(curved.edges,plain.edges+(a.outer/1.5-a.outer),atol=1e-12)
+    np.testing.assert_allclose(curved.edges,plain.edges+(155./1.5-155.),atol=1e-12)
 
 
 def test_explicit_radii_still_stretch_and_warn(synthetic,caplog):
