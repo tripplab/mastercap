@@ -1,6 +1,6 @@
 # mastercap
 
-**Current version: 0.1.15**
+**Current version: 0.1.16**
 
 Reference-driven generation of spherical geometric capsid particles in Python.
 Particles derive radial element targets and residue composition from an
@@ -8,7 +8,10 @@ Particles derive radial element targets and residue composition from an
 step-profile control wall. They are for geometry and
 visualization, not chemically valid protein design or molecular dynamics.
 
-Version 0.1.15 adds bounded pre-feasible residue recovery (on by default),
+Version 0.1.16 adds outer-radius geometry factors for both target arms and
+compact, SHA-256-checked atom-data sidecars by default. See
+[geometry factors and report files](#geometry-factors-and-report-files-v0116).
+Search and geometry defaults are unchanged. Version 0.1.15 added bounded pre-feasible residue recovery (on by default),
 opt-in whole-residue wall translations and undo diagnostics by residue relation.
 Wall selection remains `edge-first` and bin dithering remains 1. Reference/step
 targets, mandatory geometry and calibration definitions are unchanged. Set
@@ -18,7 +21,7 @@ targets, mandatory geometry and calibration definitions are unchanged. Set
 for the earlier search behavior.
 
 **Status:** geometric prototype with synthetic regression tests, complete 1CWP
-benchmarks through v0.1.12 and reference-resampling calibration. v0.1.15 adds
+benchmarks through v0.1.12 and reference-resampling calibration. v0.1.16 adds
 synthetic unit coverage and runs the existing suite; no benchmarks or production
 particles are run in this revision. Full-capsid behavior awaits user validation.
 Independent experimental
@@ -1523,12 +1526,86 @@ new PDB. Existing outputs require `--overwrite`. All output content is staged;
 promotion errors trigger rollback. Individual files are atomic, but the group
 is not crash-atomic. No incomplete PDB replaces a prior successful output.
 
+## Geometry factors and report files (v0.1.16)
+
+`generate` and `calibrate` accept `--curvature-factor F` and
+`--thickness-factor G`. Both range from 0.25 to 4; when either is supplied,
+the other defaults to 1. For each arm's own reference outer radius `R0` and
+thickness `T0`:
+
+```text
+outer = R0 / F
+thickness = G * T0
+inner = outer - thickness
+```
+
+The outer radius is the basis because it is the indented surface in the
+mechanics model. The step arm uses its fitted half-height bounds; the layered
+arm uses the selected reference bounds (extrema or percentiles). Thus equal
+factors mean equal relative changes, rather than identical absolute radii.
+Step support still extends half the fixed ramp width past each bound.
+Factors cannot be combined with `--inner-radius` or `--outer-radius`.
+Invalid geometry fails before search: step bounds must accommodate the ramp,
+and layered geometry needs positive inner radius and at least two nominal bins
+of thickness. With neither factor, the existing radius path is unchanged.
+
+```bash
+mastercap generate --input reference.pdb --output-prefix results/resized \
+  --curvature-factor 1.5 --thickness-factor 0.8 --seed 42 --allow-approximate
+```
+
+The `geometry_scaling` block records reference/generated bounds, thickness and
+mid-radius, outer- and mid-radius ratios, and the supplied factors. Configuration
+stores the resolved bounds; validation rebuilds them and checks consistency.
+Layered edges and layer features stretch with `G`; the recorded nominal layer
+width is `G * bin_width`. Search still receives the original `--bin-width`.
+Calibration resolves factors identically and records them; compatibility depends
+on matching actual target support, not on the spelling of the resize options.
+
+By default, generation publishes `PREFIX.pdb`, `PREFIX.json` and
+`PREFIX.atomdata.npz` together. `--report-atom-data` selects:
+
+| Mode | Atom mapping and residue/initial transforms | Validation |
+|---|---|---|
+| `sidecar` (default) | Compressed NPZ, outside JSON | Full provenance, sidecar SHA-256 verified |
+| `inline` | Legacy JSON blocks, with their original content | Full provenance; old inline reports remain supported |
+| `omit` | Not stored | Reference residue signatures only; residue RMSD unavailable |
+
+The small JSON `atom_data` block gives mode, relative sidecar filename, SHA-256,
+atom/residue counts and median/p95/max fitted residue RMSD. Keep the sidecar next
+to its report, or use `mastercap validate ... --atom-data /new/path/data.npz`.
+Validation prefers inline data, then the explicit path, then the saved relative
+path. Missing sidecars and hash mismatches fail. An omitted mapping produces a
+warning and requires each residue's name and sorted atom-name/element inventory
+to match a reference residue. It does not claim atom-level provenance; drift
+diagnostics are unavailable (`null`), rather than zero.
+
+Sidecar `format_version=1` is a scalar integer. Files load with
+`numpy.load(path, allow_pickle=False)`; no object arrays are used. Core fields:
+
+| Fields | Type / shape |
+|---|---|
+| `id`, `synthetic_residue`, `reference_atom_index` | int32, one per atom in PDB order |
+| `residue` | int32, one per residue |
+| `rotation_row_vector`, `translation` | float64, `(residues, 3, 3)` / `(residues, 3)` |
+| `rigid_fit_rmsd_angstrom` | float64, one per residue |
+| `initial_rotation`, `initial_translation` | float64, initial residue transforms |
+
+Additional mapping, origin and transform fields use named columns with string
+arrays and presence/null masks where needed. Structured extras use JSON strings
+inside Unicode arrays, never pickles. All output files share staging, overwrite
+and input-protection rules; terminal output gives JSON and sidecar sizes.
+Validation's own JSON carries source/hash verification metadata and never copies
+the per-atom blocks. Failure reports use a separate diagnostic sidecar when
+initial transforms are available, protecting previous successful outputs.
+
 ## PDB convention and VMD
 
 One file contains ATOM, TER and END, without MODEL or CONECT. Residues are never
 split across segments. Serial/residue numbering restarts as needed and chain
 characters may be reused. This repeated-serial convention is **not strict global
-PDB identifier uniqueness**; JSON mapping by record order is authoritative.
+PDB identifier uniqueness**; provenance mapping by record order (in the sidecar
+by default, or inline JSON) is authoritative.
 Coordinates outside PDB 8.3 field capacity are rejected.
 
 The internal reader round-trips more than 99,999 atoms. VMD must independently
