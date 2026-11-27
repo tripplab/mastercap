@@ -19,7 +19,8 @@ from .diagnostics import particle_diagnostics, mesh_sizes
 from .refinement import resolve_drift_step, resolve_landing_depth
 from .constraints import GeometryMetadata, inter_residue_configuration
 from .analysis import (analyze, build_target, distance_statistics, parse_limit_override,
-                       resolve_limit_overrides, held_out_target, dither_partitions)
+                       resolve_limit_overrides, held_out_target, dither_partitions, resolve_geometry)
+from .atomdata import store_atom_data, load_atom_data, verify_provenance
 from .constraints import (acceptance, profile_metrics, validate_geometry,
                           connectivity_audit, require_connectivity_audit,
                           pair_distance_audit, require_pair_distance_audit)
@@ -229,6 +230,8 @@ class DetailedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.Raw
         "step_edge_width": "4.0 with --step-profile",
         "floor_basis": "orientation (counting with --step-profile)",
         "inter_residue_scale": "1.0 with --inter-residue-limits reference",
+        "curvature_factor": "1 when either geometry factor is supplied",
+        "thickness_factor": "1 when either geometry factor is supplied",
     }
 
     def _get_help_string(self, action):
@@ -362,7 +365,7 @@ Output:
   optional profiles use PREFIX_profiles.csv / .png. A failure writes a separate
   PREFIX.diagnostic.json when possible, without publishing an invalid PDB.
   One PDB uses TER-separated segments; serials/chains can repeat in large files.
-  JSON atom order/provenance is authoritative. This is a geometric model, not a
+  PDB-record-order provenance (sidecar by default, or inline) is authoritative. This is a geometric model, not a
   chemically valid protein or force-field-ready structure.""",
     "validate": """Examples:
   mastercap validate --input ./1cwp_full.vdb.gz --pdb results/particle.pdb --report results/particle.json --output-prefix results/validation
@@ -485,6 +488,33 @@ FEM-ORIENTED DIAGNOSTICS:
   These packing controls do not change calibration settings or target profiles.
 """
 
+GEOMETRY_HELP = """
+GEOMETRY FACTORS:
+  --curvature-factor F --thickness-factor G resize either arm using its own
+  reference outer radius R0 and thickness T0: outer = R0/F, thickness = G*T0,
+  inner = outer - thickness. A missing factor is 1; supported range is [0.25, 4].
+  Step uses fitted half-height bounds; layered uses the selected reference bounds.
+  Factors are exclusive with --inner-radius and --outer-radius. Example:
+    --curvature-factor 1.5 --thickness-factor 0.8
+  Layered bins/features stretch with G; step ramp width stays fixed. The report
+  records outer- and mid-radius ratios, resolved bounds and effective layer width.
+  calibrate uses the same geometry; tolerances require matching resolved support.
+"""
+
+REPORT_HELP = """
+REPORT FILES:
+  generate defaults to --report-atom-data sidecar: PREFIX.json plus compressed
+  PREFIX.atomdata.npz (format_version 1, arrays only, no pickle). Atom mapping,
+  residue transforms and search initial transforms are outside JSON. Keep the
+  sidecar with the report; its relative path and SHA-256 are recorded in JSON.
+  inline retains the legacy JSON blocks. omit stores no per-atom data; validate
+  then checks residue signatures only and residue RMSD is unavailable.
+  validate reads legacy inline data first, otherwise --atom-data PATH or the
+  saved sidecar beside --report. Missing or hash-mismatched sidecars fail.
+  Validation reports never inline atom data. Outputs share overwrite/protection
+  rules; terminal output reports JSON and compressed atom-data sizes.
+"""
+
 SMOOTHING_HELP = """
 Smoothing and radial resolution:
   --smoothing-sigma is Gaussian width in A, not a number of bins. Higher sigma
@@ -590,7 +620,7 @@ def parser():
                        "calibrate": "Measure reference profile error levels (counting, orientation, placement floors), optionally compare other structures, and suggest per-element tolerances. No particle is generated."}[name]
         command = sub.add_parser(name, help=description, description=description,
                                  formatter_class=DetailedHelpFormatter,
-                                 epilog=COMMAND_EXAMPLES[name]+(FEM_HELP if name in ("generate","validate") else "")+(STEP_HELP+SMOOTHING_HELP if name != "validate" else "")+"\n"+EXIT_HELP)
+                                 epilog=COMMAND_EXAMPLES[name]+(FEM_HELP+REPORT_HELP if name in ("generate","validate") else "")+(GEOMETRY_HELP if name in ("generate","calibrate") else "")+(STEP_HELP+SMOOTHING_HELP if name != "validate" else "")+"\n"+EXIT_HELP)
         result.command_parsers.append(command)
         if name!="calibrate":
             command.add_argument("--pair-limit-override", action=PairLimitAction, metavar="PAIR=VALUE", help="Repeatable positive A/steric/pooled/reference distance override; steric uses element-derived measured ratios; all new overrides obey the covalent floor; default S-S=steric. Use S-S=reference for old spacing. Validation applies saved numeric override values")
@@ -623,7 +653,11 @@ def parser():
         if name in ("analyze","generate","calibrate"):
             command.add_argument("--inner-radius", type=finite_nonnegative, help="Inner atom-center radius in A; with --step-profile: step half-height bound; atoms may extend --step-edge-width/2 beyond it")
             command.add_argument("--outer-radius", type=finite_positive, help="Outer atom-center radius in A; with --step-profile: step half-height bound; atoms may extend --step-edge-width/2 beyond it")
+        if name in ('generate','calibrate'):
+            command.add_argument('--curvature-factor',type=finite_positive,default=None,help='Curvature multiplier F in [0.25,4]: arm reference outer radius / F; exclusive with explicit radii; missing factor means 1')
+            command.add_argument('--thickness-factor',type=finite_positive,default=None,help='Thickness multiplier G in [0.25,4] on the arm reference thickness; exclusive with explicit radii; missing factor means 1')
         if name == "generate":
+            command.add_argument('--report-atom-data',choices=('sidecar','inline','omit'),default='sidecar',help='Per-atom mapping and residue transforms: compressed NPZ beside JSON (default), old inline layout, or omit with weaker signature-only validation')
             command.add_argument("--center", choices=("reference", "origin"), default="reference", help="Target center: reference coordinate mean or origin (0, 0, 0)")
             command.add_argument("--mode", choices=("independent", "residue"), default="independent", help="Move individual atoms (independent) or preserve observed residue geometry with rigid moves (residue)")
             command.add_argument("--sulfur-residue-placement", choices=("off", "profile", "reference"), default="off", help="Optionally anchor the first S per S-containing residue: profile uses target quantiles (regular: bin midpoints); reference uses its own reference atom radius without quantization, requires radii within target bounds. Spacing swaps; repair-only dead-zone spring; refinement preserves assigned bins")
@@ -691,6 +725,7 @@ def parser():
         if name == "validate":
             command.add_argument("--pdb", type=Path, required=True, help="Required generated particle PDB to revalidate")
             command.add_argument("--report", type=Path, required=True, help="Required JSON report from the matching successful generation")
+            command.add_argument('--atom-data',type=Path,help='Override a sidecar location; inline provenance takes priority; SHA-256 is checked against the generation report')
     return result
 
 
@@ -721,6 +756,13 @@ def resolve_target_options(args):
     """Resolve contextual defaults and reject incompatible flags before input I/O."""
     if args.command == 'validate':
         return
+    if args.command in ('generate','calibrate'):
+        factors=(args.curvature_factor,args.thickness_factor)
+        if any(value is not None for value in factors):
+            if args.inner_radius is not None or args.outer_radius is not None:
+                raise MastercapError('Geometry factors are mutually exclusive with --inner-radius and --outer-radius')
+            if any(value is not None and not .25 <= value <= 4 for value in factors):
+                raise MastercapError('Geometry factors outside the supported range [0.25, 4]')
     if args.command == 'generate':
         if args.inter_residue_limits=='off' and args.inter_residue_scale is not None:
             raise MastercapError('--inter-residue-scale requires --inter-residue-limits reference')
@@ -750,12 +792,27 @@ def resolve_target_options(args):
 def target_settings(args, analysis, edges):
     return profile_settings(analysis, edges, args.bin_width, args.radius_method, args.radius_percentiles,
                             model='step' if args.step_profile else 'reference',
-                            step_edge_width=args.step_edge_width if args.step_profile else None)
+                            step_edge_width=args.step_edge_width if args.step_profile else None,
+                            curvature_factor=getattr(args,'curvature_factor',None),thickness_factor=getattr(args,'thickness_factor',None))
 
 
 def configured_target(args, analysis):
+    inner,outer,scaling=resolve_geometry(analysis,step=args.step_profile,edge_width=args.step_edge_width,
+        curvature_factor=getattr(args,'curvature_factor',None),thickness_factor=getattr(args,'thickness_factor',None))
+    if scaling is not None:
+        args.inner_radius,args.outer_radius=inner,outer
+        args.curvature_factor=scaling['curvature_factor'];args.thickness_factor=scaling['thickness_factor']
+        old,new=scaling['reference'],scaling['generated']
+        LOG.info('Geometry factors: curvature x %g (outer %.6f -> %.6f A), thickness x %g (%.6f -> %.6f A); '
+                 'inner %.6f A; mid-radius %.6f -> %.6f A; arm %s',
+                 scaling['curvature_factor'],old['outer'],new['outer'],scaling['thickness_factor'],old['thickness'],new['thickness'],
+                 new['inner'],old['mid_radius'],new['mid_radius'],scaling['arm'])
+        if not args.step_profile and scaling['thickness_factor'] != 1:
+            LOG.info('Layered target stretched by thickness factor %g: bins %g A, layer features scaled by %g',
+                     scaling['thickness_factor'],scaling['layered_bin_width_angstrom'],scaling['thickness_factor'])
     target = build_target(analysis, args.inner_radius, args.outer_radius, step=args.step_profile,
                           edge_width=args.step_edge_width, bin_width=args.bin_width)
+    target.geometry_scaling=scaling
     if target.step is not None:
         block = target.step
         bounds, density = block['generated_bounds'], block['density']
@@ -771,6 +828,17 @@ def configured_target(args, analysis):
             LOG.warning('Step plateau density %g exceeds the densest reference bin %g; packing may fail',
                         density['plateau_total'], density['reference_max_bin'])
     return target
+
+
+def verify_geometry_scaling(target,saved):
+    if not saved.get('geometry_scaling'):return
+    try:
+        recorded=saved['geometry_scaling']['generated']
+        bounds=target.step['generated_bounds'] if target.step else {'inner':target.edges[0],'outer':target.edges[-1]}
+        if not np.allclose([bounds[k] for k in ('inner','outer')],[recorded[k] for k in ('inner','outer')],rtol=0,atol=1e-9):
+            raise ValueError('resolved bounds')
+    except (KeyError,ValueError,TypeError) as exc:
+        raise MastercapError(f'Recomputed geometry differs from geometry_scaling.generated: {exc}') from exc
 
 
 def verify_saved_step(target, saved):
@@ -795,10 +863,11 @@ def verify_saved_step(target, saved):
         raise MastercapError(f'Recomputed step target differs from the generation report: {exc}') from exc
 
 
-def artifacts(prefix, csv=False, plot=False, pdb=False):
+def artifacts(prefix, csv=False, plot=False, pdb=False, atom_data=False):
     names = {"json": Path(str(prefix)+".json")}
     if pdb:
         names["pdb"] = Path(str(prefix)+".pdb")
+    if atom_data:names['atom_data']=Path(str(prefix)+'.atomdata.npz')
     if csv:
         names["csv"] = Path(str(prefix)+"_profiles.csv")
     if plot:
@@ -833,7 +902,11 @@ def diagnostic(args, report, protected):
     protected=list(protected)+([args.tolerances_from] if getattr(args,'tolerances_from',None) else [])
     # Never replace the JSON belonging to a previously successful PDB.
     path = Path(str(args.output_prefix)+".diagnostic.json")
-    publish({path: encode_json(report)}, args.overwrite, protected)
+    files={}
+    if 'initial_transforms' in report.get('search',{}) and getattr(args,'report_atom_data','inline') != 'inline':
+        files.update(store_atom_data(report,args.report_atom_data,Path(str(args.output_prefix)+'.diagnostic.atomdata.npz')))
+    files[path]=encode_json(report)
+    publish(files, args.overwrite, protected)
     LOG.error("No new PDB written. Diagnostic: %s", path)
 
 
@@ -882,6 +955,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                                    "manual_tolerances" if args.profile_tolerance is not None or args.composition_tolerance is not None else "not_supplied"), "pdb_convention": "TER segments; serials and chains may repeat"})
     if target.step is not None:
         report["target"]["step"] = target.step
+    if target.geometry_scaling is not None:report['geometry_scaling']=target.geometry_scaling
     LOG.info("Selected reference: %d atoms; target radii %.3f..%.3f A; seed %d", len(analysis.structure.atoms), edges[0], edges[-1], args.seed)
     export_started = None
     try:
@@ -1055,6 +1129,7 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
                        "elapsed_seconds": time.monotonic()-started,
                        "peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024})
         files = {names["pdb"]: text}
+        files.update(store_atom_data(report,args.report_atom_data,Path(str(args.output_prefix)+'.atomdata.npz')))
         extra_profiles(files, names, edges, target.reference_on_edges, profiles, metrics["generated_profiles"],
                        smoothing_enabled=analysis.smoothing_sigma > 0, target_label="Step target" if target.step else "Smoothed target")
         timings["export_validation"] = time.monotonic()-export_started
@@ -1062,6 +1137,8 @@ def generate_command(args, analysis, source, acquisition, started, names, prepar
         LOG.info("Serializing JSON report and publishing output files")
         files[names["json"]] = encode_json(report)
         publish(files, args.overwrite, [source]+([args.tolerances_from] if getattr(args,'tolerances_from',None) else []))
+        LOG.info('Report: %.3f MB JSON, %.3f MB atom data (%s)',len(files[names['json']])/1e6,
+                 sum(len(value) for path,value in files.items() if Path(path).suffix=='.npz')/1e6,args.report_atom_data)
         LOG.info("%s: %s (%d atoms)", status, names["pdb"], len(particle.atoms))
         return 0 if status == "valid" else 2
     except (MastercapError, KeyboardInterrupt) as exc:
@@ -1111,19 +1188,16 @@ def validate_command(args, source, started, names):
         raise
     edges, profiles = target.edges, target.profiles
     verify_saved_step(target, saved)
+    verify_geometry_scaling(target,saved)
     configure_tolerances(args,analysis,edges,settings_from_generation(saved),config)
     config['profile_tolerance']=args.profile_tolerance;config['composition_tolerance']=args.composition_tolerance
     center = analysis.center if config["center"] == "reference" else np.zeros(3)
-    mapping = saved["atom_mapping"]
-    if len(mapping) != len(particle.atoms):
-        raise MastercapError("Atom mapping length does not match PDB")
-    # Validate identity and membership by file order, never repeated PDB serials.
-    for i, (atom, item) in enumerate(zip(particle.atoms, mapping)):
-        if item["id"] != i or item["synthetic_residue"] != atom.residue:
-            raise MastercapError("PDB residue grouping does not match report")
-        origin = analysis.structure.atoms[item["origin"]["reference_atom_index"]]
-        if (atom.name, atom.element, atom.resname) != (origin.name, origin.element, origin.resname):
-            raise MastercapError("PDB atom identity does not match reference provenance")
+    atom_data=load_atom_data(saved,args.report,getattr(args,'atom_data',None))
+    if atom_data.mapping is None:
+        LOG.warning('Report has no per-atom data; provenance checked by residue signature only')
+    verify_provenance(atom_data,particle,analysis.structure)
+    transforms=atom_data.transforms
+    atom_protected=[atom_data.source['path']] if atom_data.source.get('path') else []
     inter_limits, inter_report=inter_residue_configuration(analysis,config["overlap_margin"],LOG.warning)
     LOG.info("Validating geometry, connectivity and radial profiles")
     geometry = validate_geometry(particle, center, edges, analysis.limits, config["overlap_margin"], saved["effective_mode"],metadata=final_metadata(particle,analysis))
@@ -1138,9 +1212,10 @@ def validate_command(args, source, started, names):
                       warnings=analysis.warnings,
                       distance_limits={'-'.join(pair):limit for pair,limit in analysis.limits.items()},
                       distance_limit_overrides=analysis.distance_limit_overrides)
-        add_diagnostics(failed,particle,analysis,center,target,args.mesh_element_sizes,saved.get('residue_transforms'))
+        failed['atom_data']=atom_data.source
+        add_diagnostics(failed,particle,analysis,center,target,args.mesh_element_sizes,transforms)
         path = Path(str(args.output_prefix)+'.diagnostic.json')
-        publish({path:encode_json(failed)},args.overwrite,[source,args.pdb,args.report])
+        publish({path:encode_json(failed)},args.overwrite,[source,args.pdb,args.report]+atom_protected)
         LOG.error('Validation failed; audit diagnostic: %s',path)
         raise
     metrics = final_profile_metrics(particle, center, target, config.get('refine_bin_dither',1))
@@ -1156,12 +1231,14 @@ def validate_command(args, source, started, names):
         report['target'] = {'center': center.tolist(), 'edges': edges.tolist(),
                             'profiles': {e:p.tolist() for e,p in profiles.items()}, 'step': target.step}
     report["inter_residue_limits"]=inter_report
-    add_diagnostics(report, particle, analysis, center, target, args.mesh_element_sizes, saved.get("residue_transforms"))
+    report['atom_data']=atom_data.source
+    if saved.get('geometry_scaling'):report['geometry_scaling']=saved['geometry_scaling']
+    add_diagnostics(report, particle, analysis, center, target, args.mesh_element_sizes, transforms)
     files = {names["json"]: encode_json(report)}
     extra_profiles(files, names, edges, target.reference_on_edges, profiles, metrics["generated_profiles"],
                    smoothing_enabled=analysis.smoothing_sigma > 0, target_label="Step target" if target.step else "Smoothed target")
     LOG.info("Publishing validation report: %s", names["json"])
-    publish(files, args.overwrite, [source, args.pdb, args.report]+([args.tolerances_from] if args.tolerances_from else []))
+    publish(files, args.overwrite, [source, args.pdb, args.report]+atom_protected+([args.tolerances_from] if args.tolerances_from else []))
     LOG.info("Validation status: %s", status)
     return 1 if status == "failed" else 0 if status == "valid" else 2
 
@@ -1180,7 +1257,8 @@ def run(args):
             return 1
         raise
     preparation_timings = {"reference": time.monotonic()-started}
-    names = artifacts(args.output_prefix, args.csv, args.plot, args.command == "generate")
+    names = artifacts(args.output_prefix, args.csv, args.plot, args.command == "generate",
+                      args.command=='generate' and args.report_atom_data=='sidecar')
     if args.command=='calibrate':
         names={key:Path(str(args.output_prefix)+'_calibration.'+ext) for key,ext in [('json','json')]+([('csv','csv')] if args.csv else [])+([('plot','png')] if args.plot else [])}
         sibling=Path(str(args.output_prefix)+'.json')
@@ -1196,6 +1274,7 @@ def run(args):
     if getattr(args,'tolerances_from',None):protected.append(args.tolerances_from)
     if args.command == "validate":
         protected.extend([args.pdb, args.report])
+        if args.atom_data:protected.append(args.atom_data)
     preflight(names.values(), args.overwrite, protected)
     if args.command == "validate":
         return validate_command(args, source, started, names)
@@ -1236,6 +1315,7 @@ def run(args):
                 LOG.info('Calibration %s %s: %s',name,row['file'],', '.join(f'{e}={v:.6g}' for e,v in row.get('errors',row.get('shape')).items()))
         report=base_report(args,started)
         report.update(status='calibration_complete',calibration=calibration,warnings=analysis.warnings,acquisition=acquisition)
+        if target.geometry_scaling is not None:report['geometry_scaling']=target.geometry_scaling
         if target.step is not None:report['target']={'step':target.step, 'edges':edges.tolist(), 'profiles':{e:p.tolist() for e,p in profiles.items()}}
         files={names['json']:encode_json(report)}
         if args.csv:files[names['csv']]=calibration_csv(calibration)

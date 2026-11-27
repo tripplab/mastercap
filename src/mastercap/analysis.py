@@ -26,6 +26,7 @@ class Analysis:
     inter_residue: dict = field(default_factory=dict)
     inter_statistics: dict = field(default_factory=dict)
     inter_scale: float = 1.0
+    nominal_bin_width: float | None = None
 
     @property
     def inner(self):
@@ -233,7 +234,7 @@ def analyze(structure, width=1.0, sigma=1.0, radius_method="extrema", percentile
     if excluded:
         warnings.append(f"Excluded {excluded} atoms outside selected radial interval; residues may be partial")
     result=Analysis(selected, center, edges, original, smooth, limits, samples, warnings, excluded, sigma,
-                    override_records, grouped)
+                    override_records, grouped, nominal_bin_width=width)
     if inter_residue_limits not in ('off','reference') or not np.isfinite(inter_residue_scale) or inter_residue_scale<=0:
         raise MastercapError('Inter-residue mode must be off/reference and scale finite positive')
     if inter_residue_limits=='reference':
@@ -260,6 +261,37 @@ class Target:
     profiles: dict
     reference_on_edges: dict | None
     step: dict | None = None
+    geometry_scaling: dict | None = None
+
+
+def resolve_geometry(analysis, *, step, edge_width, curvature_factor=None, thickness_factor=None):
+    """Scale each arm's own outer radius and thickness; no factors means no change."""
+    if curvature_factor is None and thickness_factor is None:return None,None,None
+    f=1. if curvature_factor is None else float(curvature_factor)
+    g=1. if thickness_factor is None else float(thickness_factor)
+    if not np.isfinite([f,g]).all() or not .25 <= f <= 4 or not .25 <= g <= 4:
+        raise MastercapError(f'Geometry factors f={f:g}, g={g:g} outside the supported range [0.25, 4]')
+    if step:
+        from .step import fit_step,validate_bounds
+        fitted=fit_step(np.linalg.norm(analysis.structure.xyz-analysis.center,axis=1),edge_width=edge_width)
+        a,b=fitted.inner,fitted.outer
+    else:a,b=analysis.inner,analysis.outer
+    t0=b-a;outer=b/f;thickness=g*t0;inner=outer-thickness
+    nominal=getattr(analysis,'nominal_bin_width',None)
+    nominal=float(np.mean(np.diff(analysis.edges))) if nominal is None else nominal
+    try:
+        if step:validate_bounds(inner,outer,edge_width)
+        elif inner <= 0 or thickness < 2*nominal:
+            raise MastercapError('Layered geometry needs inner > 0 and thickness >= 2 * nominal bin width')
+    except MastercapError as exc:
+        raise MastercapError(f'Geometry factors f={f:g}, g={g:g} give invalid bounds {inner:.12g}..{outer:.12g} A: {exc}') from exc
+    block={'basis':'outer_radius','arm':'step' if step else 'layered','curvature_factor':f,'thickness_factor':g,
+           'reference':{'inner':a,'outer':b,'thickness':t0,'mid_radius':(a+b)/2},
+           'generated':{'inner':inner,'outer':outer,'thickness':thickness,'mid_radius':(inner+outer)/2},
+           'outer_radius_ratio':b/outer,'mid_radius_ratio':(a+b)/(inner+outer),'thickness_ratio':g}
+    if step:block['step_support']=[inner-edge_width/2,outer+edge_width/2]
+    else:block['layered_bin_width_angstrom']=nominal*g
+    return inner,outer,block
 
 
 def target_on_edges(target, new_edges):

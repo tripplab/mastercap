@@ -16,6 +16,7 @@ thresholds remain provisional until calibrated on expanded CCMV 1CWP.
 | `generate.py` | Integer inventory, initialization, bounded repair, rigid projection. |
 | `refinement.py` | Candidate ranking, slack targets, checked partial pushes, acceptance and rollback controllers. |
 | `reports.py` | JSON/CSV/PNG, staged output and rollback. |
+| `atomdata.py` | Pickle-free compressed provenance/transform sidecars, legacy loading and identity checks. |
 | `cli.py` | Combined workflows, configuration, provenance and reread validation. |
 
 Coordinates are float64 arrays. Atom identity is independent of serial numbers.
@@ -631,3 +632,55 @@ edge-first and bin dithering stays 1. The unit suite includes small template,
 wall, anchor, streak/cap/RNG, multi-element inventory, mixed rigid acceptance,
 rounding and diagnostic fixtures, plus a tiny CLI generation test. No benchmark
 or production particles are executed in this revision.
+
+## Geometry factors and compact reports (v0.1.16)
+
+`resolve_geometry` returns `(None, None, None)` without factors, preserving the
+existing target path and random draws. Otherwise missing factors become one;
+finite F/G in [0.25, 4] are required and explicit radii are exclusive. The arm's
+own reference geometry supplies R0/T0: fitted half-height step bounds, or
+selected analysis bounds for layered targets. Resolve outer=R0/F,
+thickness=G*T0 and inner=outer-thickness. Step `validate_bounds` enforces fixed
+ramp support; layered inner must be positive and thickness at least twice the
+nominal analysis bin width. Errors identify factors and resulting bounds.
+
+The outer surface is the indentation basis. `geometry_scaling` also records
+reference/generated mid-radius and their ratio for mid-surface mechanics,
+outer-radius ratio, thickness ratio, and step support or nominal layered width
+G*bin_width. Layered profiles retain linear edge stretching, scaling layer
+features with thickness; the bin width passed to search is unchanged. Resolved
+bounds and factors enter configuration; validation rebuilds the target from
+those bounds and checks generated geometry to absolute 1e-9 A. Calibration
+uses the same resolver and records factors, but settings compatibility continues
+to compare target support rather than factor metadata. No target/profile/search
+definition changes in the absence of the new options.
+
+`store_atom_data` defaults to `sidecar`, stripping atom_mapping,
+residue_transforms and search.initial_transforms from JSON after building
+diagnostics from the same in-memory objects. `inline` leaves those blocks
+unchanged; `omit` retains only scalar metadata and RMSD summaries. Sidecar
+format_version=1 uses numpy.savez_compressed with no object arrays. The three
+core atom columns (id, synthetic_residue, reference_atom_index) and residue are
+int32; rotations, translations and fitted RMSD are float64. Rotation shapes are
+(n,3,3), translations (n,3); initial_rotation and initial_translation follow the
+same shapes. Other mapping/origin/initial fields use named column manifests,
+Unicode/typed arrays and null/presence masks; structured extras use Unicode
+JSON. Rigid fallback initial transforms are preserved separately when present.
+
+JSON atom_data holds mode, relative basename, SHA-256, counts, median/p95/max
+RMSD, and the initial-transform location. NPZ, PDB and JSON publish together
+under existing staging/protection/rollback rules. Failed runs use the distinct
+diagnostic atom-data basename. Sizes are logged after successful publication.
+
+All readers use load_atom_data: inline legacy blocks first, explicit --atom-data
+second, saved path relative to --report third. Sidecars load with
+allow_pickle=False and verify hash/version/core column shapes and types.
+Validation compares PDB-order ids, residue grouping and reference atom
+name/element/resname using mapping arrays directly, without expanding per-atom
+JSON dictionaries. Transforms are reconstructed only for residue diagnostics.
+Omit mode warns and checks residue name plus sorted atom-name/element signatures
+against reference signatures; fitted drift is unavailable, not zero. A missing
+required sidecar fails with the expected path and relocation option. Validation
+outputs only source/hash verification metadata, never atom tables. Old inline
+reports need no migration. Unit tests cover these paths and geometry scaling;
+no benchmark or production runs are part of this revision.

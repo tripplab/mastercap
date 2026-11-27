@@ -92,13 +92,15 @@ def resampling_levels(analysis,edges,target,replicates=50,seed=42,progress=None,
     return levels
 
 
-def profile_settings(analysis,edges,bin_width,radius_method='extrema',percentiles=(.5,99.5), *, model='reference', step_edge_width=None):
+def profile_settings(analysis,edges,bin_width,radius_method='extrema',percentiles=(.5,99.5), *, model='reference', step_edge_width=None,
+                     curvature_factor=None,thickness_factor=None):
     return {'reference_hash':analysis.structure.provenance['sha256'],
             'reference_filename':Path(analysis.structure.provenance['path']).name,
             'model':analysis.structure.provenance['model'],'bin_width':float(bin_width),
             'smoothing_sigma':analysis.smoothing_sigma,'inner_radius':float(edges[0]),'outer_radius':float(edges[-1]),
             'edges_count':len(edges),'radius_method':radius_method,'radius_percentiles':list(percentiles),
-            'profile_model':model,'step_edge_width':step_edge_width if model=='step' else None}
+            'profile_model':model,'step_edge_width':step_edge_width if model=='step' else None,
+            'curvature_factor':curvature_factor,'thickness_factor':thickness_factor}
 
 
 def check_settings(saved,current):
@@ -128,7 +130,8 @@ def settings_from_generation(saved):
             'edges_count':len(saved['target']['edges']),'radius_method':options['radius_method'],
             'radius_percentiles':options['percentiles'],
             'profile_model':'step' if options.get('step_profile',False) else 'reference',
-            'step_edge_width':options.get('step_edge_width',4.0) if options.get('step_profile',False) else None}
+            'step_edge_width':options.get('step_edge_width',4.0) if options.get('step_profile',False) else None,
+            'curvature_factor':config.get('curvature_factor'),'thickness_factor':config.get('thickness_factor')}
 
 
 def load_tolerances(path,current,elements,warning=None):
